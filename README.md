@@ -2,6 +2,18 @@
 
 **Your own AI. On your own machine. Hybrid by design.**
 
+# ⚠️ WARNING — READ THIS BEFORE YOU RUN ANYTHING ⚠️
+
+## This is insane software. It is probably not safe to run.
+
+Prometheus is an AI agent with **the same access as your user account**. It executes shell commands, moves your mouse and types on your keyboard, drives your real browser with your real logged-in sessions and saved passwords, reads and sends your email, and can **edit and restart its own source code**. There is no sandbox and no container. A model mistake, a prompt injection from a web page it visits, or an email it reads can do anything you can do at a terminal.
+
+![Safety warning modal shown on first dashboard launch](docs/screenshots/warning.png)
+
+This is the warning the dashboard shows on first launch. It is not a joke and it is not boilerplate. Do not run Prometheus on a machine you care about unless you have read the code, understood the risks, and accepted that you are handing a language model the keys to your computer.
+
+---
+
 Prometheus is a personal AI assistant that lives on your desktop. It runs local models through Ollama for fast, private tasks, and reaches out to cloud models for heavy lifting — all within a single conversation. It connects to your real browser, controls your desktop, manages your email and calendar, and talks to you through whatever channel you prefer.
 
 ---
@@ -42,8 +54,6 @@ Every agent's model is picked in the dashboard — local Ollama or cloud, your c
 
 Atlas runs in the background. When the orchestrator delegates to Atlas, it gets a job ID back immediately and stays free to handle your next message. Results land in an **inbox** — the orchestrator drains it at turn end, digests what matters, and chains follow-up tasks. Urgent jobs can interrupt mid-turn. You're never stuck waiting for a long-running task to finish before you can keep talking.
 
-![Quick Actions panel: one-touch prompts for setup, review, write, and research](docs/screenshots/actions.png)
-
 ### Persistent Runner
 
 The agent-runner spawns as a persistent child process — no Docker, no containers, no cold starts between messages. It stays warm for hours (configurable `IDLE_TIMEOUT`), keeping MCP servers connected and skills loaded. Follow-up messages route over IPC in milliseconds.
@@ -82,7 +92,11 @@ The tool loop has multiple circuit breakers to prevent common failure modes:
 
 ### Memory System
 
-The orchestrator writes directly to `MEMORY.md`, `TODO.md`, and `HEARTBEAT.md` — no delegation needed. These files are loaded into context every turn. The heartbeat file is executed on schedule by the task scheduler, giving the agent persistent autonomous behavior.
+The orchestrator writes directly to `MEMORY.md`, `TODO.md`, and `HEARTBEAT.md` — no delegation needed. These files are loaded into context every turn.
+
+### Heartbeat
+
+`HEARTBEAT.md` holds standing instructions the agent executes on schedule via the task scheduler — no prompt from you required. Edit it from the dashboard's Heartbeat panel (or let the agent edit it itself) and the instructions run automatically, giving the agent persistent autonomous behavior between conversations.
 
 ![Heartbeat panel: scheduled instructions the AI executes automatically](docs/screenshots/heartbeat.png)
 
@@ -111,6 +125,10 @@ Every model selection in the dashboard is per-role:
 | **Iris / Dexter / Byte** | Local (recommended) | Light, structured tasks. Run them local; save cloud for Atlas and the Council. |
 | **Council seats** | Cloud (3 different models) | Diverse perspectives for deliberation. |
 | **Sub-agent tools** | Configurable | Tool-calling sub-agents can use a different model. |
+
+All of this is configured from the dashboard's Settings panel — assistant name, model per role, Ollama URL, and automation settings:
+
+![Settings panel: assistant name, model configuration per role, Ollama URL, and automation settings](docs/screenshots/settings.png)
 
 ### One Pipeline, Local or Cloud
 
@@ -153,11 +171,7 @@ It discovers the display environment automatically, even when started from syste
 
 ## Dashboard
 
-A full PWA at `http://localhost:3200`.
-
-![Settings panel: assistant name, model configuration per role, Ollama URL, and automation settings](docs/screenshots/settings.png)
-
-It includes:
+A full PWA at `http://localhost:3200`. It includes:
 
 - **Chat** — the main conversation interface
 - **Projects** — deliverables, blockers, financials, time tracking
@@ -176,6 +190,12 @@ It includes:
 - **Skills & MCP** — hot-pluggable capability management
 - **Agent Activity** — live verbose status of what the agent is doing
 - **Process Logs** — live log tail
+
+### Quick Actions
+
+One-touch prompt buttons for the things you do all the time — setup, review, write, research. Press a button instead of typing the same prompt again; each action fires a pre-written prompt into the conversation.
+
+![Quick Actions panel: one-touch prompts for setup, review, write, and research](docs/screenshots/actions.png)
 
 ---
 
@@ -293,10 +313,6 @@ Model selection is per-role via the dashboard — orchestrator, Atlas, sub-agent
 ## Why Prometheus?
 
 Most AI assistants live in the cloud. They see what you type, not what you see. They run on someone else's hardware, with someone else's model, under someone else's terms.
-
-![Safety warning modal shown on first dashboard launch](docs/screenshots/warning.png)
-
-*This warning is not a joke — Prometheus runs with the same access as your user account. Read it before you continue.*
 
 Prometheus runs on your machine. It uses your browser, your desktop, your files, your email. It works with local models through Ollama, so your data never leaves your hardware unless you choose to send it. And when you need more power, it reaches out to cloud models — all within the same conversation, with the same memory.
 
