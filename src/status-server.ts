@@ -770,6 +770,7 @@ function getStatusData() {
     channels: deps.channels.map((c) => c.name),
     activeContainers: Math.max(queueStatus.activeCount, queueStatus.groups.filter((g: any) => g.active).length),
     scheduledTasks: deps.getAllTasks().length,
+    runningJobs: getLiveStatus().jobs || 0,
     groups: groupList,
     timestamp: new Date().toISOString(),
     ollamaChatModel: process.env.OLLAMA_CHAT_MODEL || OLLAMA_CHAT_MODEL,

@@ -907,6 +907,23 @@ interface AtlasJob {
     status: 'running' | 'done' | 'errored' | 'aborted';
 }
 const atlasBackgroundJobs = new Map<string, AtlasJob>();
+// Emit a live verbose-status line summarizing the Atlas background jobs currently
+// running, including a `jobs` count the dashboard surfaces as its running-jobs
+// counter. Called on every Atlas tool call (so the bar reflects real, frequent
+// progress) and on job start. Without this, the orchestrator's turn ends right
+// after it delegates to Atlas, the host clears liveStatus, and the dashboard reads
+// "idle" — even though Atlas is still working in the background.
+function emitAtlasJobsStatus() {
+    const running = [...atlasBackgroundJobs.values()].filter(j => j.status === 'running');
+    if (running.length === 0) return;
+    const head = running[0];
+    const elapsed = Math.round((Date.now() - head.startedAt) / 1000);
+    const sinceLast = Math.round((Date.now() - head.lastActionAt) / 1000);
+    const label = running.length === 1
+        ? `atlas-${head.shortId}: ${head.lastAction} — ${head.toolCallCount} call(s), ${elapsed}s elapsed (last action ${sinceLast}s ago)`
+        : `Atlas: ${running.length} jobs running — atlas-${head.shortId}: ${head.lastAction} (+${running.length - 1} more)`;
+    writeStatus({ phase: 'atlas', label, jobs: running.length, ts: Date.now() });
+}
 // Tool-calling sub-agent model (byte, dexter, iris) — from dashboard local:subagent_model.
 // The host always passes SUBAGENT_MODEL; the chain below is a last-resort default
 // (granite4.1:8b was removed — only cloud models are installed now).
@@ -2860,6 +2877,7 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
                 jobRecord.toolCallCount++;
                 jobRecord.lastAction = `${toolName}(${argsSummary})`;
                 jobRecord.lastActionAt = Date.now();
+                emitAtlasJobsStatus();
             })
                 .then(saResult => {
                     writeStatus({ phase: 'atlas', label: `Atlas ${jobShortId} complete`, ts: Date.now() });
@@ -2884,6 +2902,7 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
                 });
             jobRecord.promise = job;
             atlasBackgroundJobs.set(jobId, jobRecord);
+            emitAtlasJobsStatus();
             result = `Atlas ${jobShortId} started${urgent ? ' (urgent — its result will interrupt you when ready)' : ''} — the result will arrive in your inbox. (job id: ${jobId})`;
         }
     } else if (toolName === 'byte' || toolName === 'dexter' || toolName === 'iris') {

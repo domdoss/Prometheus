@@ -217,6 +217,7 @@ export const liveStatus = {
   phase: '',
   label: '',
   tools: [] as string[],
+  jobs: 0,
   ts: 0,
 };
 
@@ -228,6 +229,7 @@ export function clearLiveStatus() {
   liveStatus.phase = '';
   liveStatus.label = '';
   liveStatus.tools = [];
+  liveStatus.jobs = 0;
   liveStatus.ts = 0;
 }
 
@@ -320,6 +322,7 @@ function onPersistentStdoutData(chunk: Buffer) {
         liveStatus.phase = entry.phase || '';
         liveStatus.label = entry.label || '';
         liveStatus.tools = Array.isArray(entry.tools) ? entry.tools : [];
+        liveStatus.jobs = typeof entry.jobs === 'number' ? entry.jobs : 0;
         liveStatus.ts = entry.ts || Date.now();
       } catch { /* ignore malformed status lines */ }
       continue;
