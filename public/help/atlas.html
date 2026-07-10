@@ -54,8 +54,8 @@
   <div class="help-callout help-callout-info">
     <div class="help-callout-icon">⌘</div>
     <div>
-      <p>Say <code>Delegate to Atlas:</code> and describe the task. Atlas runs <strong>in the background</strong> in its own context window — the orchestrator gets a job ID back immediately and stays free for your next message. When Atlas finishes, the result lands in the orchestrator's inbox and it reports back in the chat.</p>
-      <pre>Delegate to Atlas: open example.com and take a screenshot.</pre>
+      <p>Just describe what you want — the orchestrator recognizes browser, web, and shell work and hands it to Atlas on its own. There's no magic phrase (saying <code>Delegate to Atlas:</code> works, but it's never required). Atlas runs <strong>in the background</strong> in its own context window — the orchestrator gets a job ID back immediately and stays free for your next message. When Atlas finishes, the result lands in the orchestrator's inbox and it reports back in the chat.</p>
+      <pre>Open example.com and take a screenshot.</pre>
     </div>
   </div>
 
@@ -63,8 +63,8 @@
   <div class="help-callout help-callout-info">
     <div class="help-callout-icon">⇄</div>
     <div>
-      <p>If two tasks are independent, say <code>In parallel, delegate to Atlas:</code> and enumerate them. The host runs them concurrently via <code>Promise.all</code>.</p>
-      <pre>In parallel, delegate to Atlas:
+      <p>If two tasks are independent, ask for both and say they can run in parallel. The host runs them concurrently via <code>Promise.all</code>.</p>
+<pre>In parallel:
 (1) screenshot example.com, AND
 (2) fetch the title of example.org.</pre>
     </div>
@@ -72,10 +72,10 @@
 
   <div class="help-section-label"><span>03</span> Common patterns</div>
   <div class="pattern-grid">
-    <div class="pattern-card"><h4>Screenshot a page</h4><pre>Delegate to Atlas: screenshot example.com.</pre><p>Returns the rendered page as an image Atlas can read.</p></div>
-    <div class="pattern-card"><h4>Read a URL</h4><pre>Delegate to Atlas: open docs.example.com/api and tell me the auth options.</pre><p>Atlas reads the page text and summarizes.</p></div>
-    <div class="pattern-card"><h4>Click + screenshot</h4><pre>Delegate to Atlas: open the app, click "Sign in", screenshot the result.</pre><p>Atlas can interact with the page, not just read it.</p></div>
-    <div class="pattern-card"><h4>Compare two pages</h4><pre>In parallel, delegate to Atlas:
+    <div class="pattern-card"><h4>Screenshot a page</h4><pre>Screenshot example.com.</pre><p>Returns the rendered page as an image Atlas can read.</p></div>
+    <div class="pattern-card"><h4>Read a URL</h4><pre>Open docs.example.com/api and tell me the auth options.</pre><p>Atlas reads the page text and summarizes.</p></div>
+    <div class="pattern-card"><h4>Click + screenshot</h4><pre>Open the app, click "Sign in", screenshot the result.</pre><p>Atlas can interact with the page, not just read it.</p></div>
+    <div class="pattern-card"><h4>Compare two pages</h4><pre>In parallel:
 (1) screenshot competitor-a.com, AND
 (2) screenshot competitor-b.com.</pre><p>Then ask the orchestrator to compare them.</p></div>
   </div>
