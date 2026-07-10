@@ -3089,5 +3089,14 @@ async function main() {
     }
     // Clear keepalive so the process can exit
     if ((globalThis as any)._keepAlive) clearInterval((globalThis as any)._keepAlive);
+    // Force-exit once the idle loop has returned (idle timeout or _close sentinel).
+    // Lingering handles — an open CDP browser socket, MCP client sockets — keep the
+    // Node event loop alive after runNativeOllama returns, leaving a zombie process:
+    // alive enough that the host's `persistentChild.exitCode === null` check passes and
+    // it routes new messages via IPC, but the main loop has already returned so those
+    // messages are never drained. The host then hangs for the full turn timeout before
+    // SIGTERMing the child. process.exit guarantees the host observes the exit and
+    // spawns a fresh child next turn instead of talking to a walking-dead process.
+    process.exit(0);
 }
 main();
