@@ -81,6 +81,22 @@ There is no scheduling agent. A schedule is two things: a **crontab expression**
 
 > ⚡ **Atlas runs in the background.** When the orchestrator delegates to Atlas, it gets a job ID back immediately and stays free to handle your next message. Results land in an **inbox** — the orchestrator drains it at turn end, digests what matters, and chains follow-up tasks. Urgent jobs can interrupt mid-turn.
 
+### 🕹️ You Never Talk to Atlas
+
+You have one conversation, with one assistant. Atlas, Iris, Dexter, and the rest never see your messages and never speak to you — the orchestrator is the only voice in the chat. It works out what you actually need, composes a self-contained brief for the right specialist, and reports back in its own words when the work is done.
+
+![The orchestrator rewrites casual requests into clean task briefs before delegating](docs/screenshots/fabric.webp)
+
+Your raw message never reaches a specialist. "hey can you set the volume to like fifty percent" goes in; *"Set the system volume to 50 percent"* is what gets delegated. Every request is rewritten into a precise, self-contained brief — typos, slang, and missing context resolved — so the executing model starts from a clean statement of the goal instead of guessing at your phrasing.
+
+And delegation isn't fire-and-forget. While Atlas jobs run, the orchestrator checks in on every one of them at a fixed interval — elapsed time, tool-call count, what the job last did and how long ago — and makes a call:
+
+- **Progressing** → leave it alone.
+- **Stuck or looping** → stop it.
+- **Failed** → the failure routes back to the orchestrator automatically; it reads the full output, works out what went wrong, and re-delegates with a reworked brief. You only hear about a failure if it can't be recovered.
+
+You ask once; the orchestrator owns the outcome — prompting the specialists, supervising them, cutting off the ones that go sideways, and correcting course until the job is done.
+
 ### Persistent Runner
 
 > 🔥 **The agent-runner is a persistent child process** — no Docker, no containers, no cold starts between messages. It stays warm for hours (configurable `IDLE_TIMEOUT`), keeping MCP servers connected and skills loaded. Follow-up messages route over IPC in milliseconds.
