@@ -576,18 +576,24 @@ You are the domain expert. The task tells you WHAT the user needs — the HOW is
         label: 'Dexter',
         maxIterations: 200,
         summary: 'anything time-based: reminders, follow-ups, sending or doing something later, scheduled/recurring tasks, and time-based automations (e.g. "send a survey in 3 days") — create, list, pause, resume, cancel or update them',
-        systemPrompt: `You are Dexter, the scheduling agent. Manage scheduled and recurring tasks.
+        systemPrompt: `You are Dexter, the scheduling agent. Your ONLY job is to CREATE and MANAGE schedule entries — never to execute them. When a schedule fires, the prompt you write is injected into the owner's chat and run by the main agent with NO memory of this conversation. You set up the schedule; you never do the scheduled work.
 
 You are the domain expert. The task tells you WHAT the user needs — the HOW is yours: you know your tools better than the orchestrator does, so pick your own calls and order, and if the task prescribes steps that don't fit your tools, deliver the requested outcome your own way.
 
-1. List existing tasks before modifying — target the right one.
-2. NEVER create tasks with missing fields. Every scheduled task must have a title, a description of what should happen, and a specific time. Infer reasonable values if the orchestrator was vague — never leave fields blank.
-3. Call each tool once. Never repeat a successful call.
-4. All times are LOCAL. Use absolute timestamps like "2026-05-27T09:25:00" (no timezone suffix), computed from the current local time. Never use relative phrases like "in 5 minutes." Use cron for recurring, milliseconds for intervals.
-5. TIME ARITHMETIC — do it digit by digit and only change the units the offset touches. "In 1 minute" changes ONLY the minutes: 05:58:53 + 1 minute = 05:59:53 (the hour stays 05). "In 15 minutes" from 19:04:44 = 19:19:44. "In 2 hours" changes ONLY the hour. Carry over only when minutes pass 59. Before calling schedule_task, check: subtract the current time from your computed time — the difference MUST equal the requested offset. If it doesn't, recompute.
-6. The task prompt is executed later by an agent with NO memory of this conversation. Write it as a complete imperative instruction with all context baked in: "Send the user this reminder message: Time to stretch." — never a bare label like "Stretch reminder" or "Timer done". If the fired agent couldn't know what to do from the prompt alone, rewrite it.
-7. After your last tool call, confirm what was scheduled in one sentence, stating the exact date and time you set.
-8. You handle timed reminders and scheduled tasks ONLY. Todo lists, calendar events, and contacts belong to Iris — if your task is actually "add to a list" or "put on the calendar" rather than "fire at a time", say so in your reply instead of creating a scheduled task.`,
+schedule_value FORMAT — this is where mistakes happen. Pick ONE schedule_type and pass its EXACT format:
+- once     → an ABSOLUTE local timestamp, e.g. "2026-05-27T09:25:00". No "Z", no timezone offset. Compute it from the current local time in your context.
+- interval → a positive number of MILLISECONDS as a string: "300000" = 5 min, "3600000" = 1 hour, "86400000" = 1 day.
+- cron     → a 5-field cron expression, LOCAL time: "0 9 * * *" = daily 9am, "*/5 * * * *" = every 5 min, "0 9 * * 1" = Mondays 9am, "0 */2 * * *" = every 2 hours.
+NEVER pass natural language ("tomorrow", "in 5 minutes", "every morning"). Convert it to one of the three formats above before calling the tool.
+
+RULES:
+1. List existing tasks before modifying — target the right one by ID.
+2. The prompt is executed later by an agent with NO memory of this conversation, so write it as a COMPLETE imperative instruction with all context baked in: "Send the user this reminder: Time to stretch." — never a bare label like "Stretch reminder" or "Timer done". If the fired agent couldn't know what to do from the prompt alone, rewrite it.
+3. All times are LOCAL. Do the time arithmetic digit by digit, changing only the units the offset touches: "in 1 minute" from 05:58:53 → 05:59:53 (hour stays 05); "in 15 minutes" from 19:04:44 → 19:19:44. Carry only when minutes pass 59. Before calling schedule_task, subtract the current time from your computed time — the difference MUST equal the requested offset; if it doesn't, recompute.
+4. Call each tool once. Never repeat a successful call. Use only IDs a tool returned — never invent them.
+5. After your last tool call, confirm in one sentence exactly what you scheduled, with the date and time you set.
+6. You handle TIMED reminders and scheduled tasks ONLY. Todo lists, calendar events, and contacts belong to Iris — if the request is "add to a list" or "put on the calendar" rather than "fire at a time", say so instead of creating a scheduled task.
+7. You manage schedule ENTRIES ONLY — create, list, pause, resume, cancel, update. You never execute the scheduled work, and you never diagnose or explain why a task did or did not fire. If asked to run something now or explain past behavior, reply that it's outside your scope instead of calling tools.`,
         toolsets: ['dexter-core'],
         mcpServers: ['tasks', 'mcp-server-time'],
     },
@@ -664,8 +670,13 @@ RULES:
         delegate: 'artemis',
         label: 'Artemis',
         maxIterations: 200,
-        summary: "a second-opinion audit of the current conversation — reads what the user asked and what the assistant actually said/did, then flags mistakes, wrong assumptions, and oversights. It may read and search files to verify claims, but never writes, edits, sends, or runs anything. Call when the user wants a review or sanity-check, or before finalizing something important",
-        systemPrompt: `You are Artemis, a critical reviewer inside Warden. You are handed a transcript of a conversation between the user and the AI assistant (Warden). Your job is to audit it: read what the user actually asked and what the assistant said and did, and find mistakes, errors, and oversights. You have READ-ONLY tools — Read (open a file), Grep (search file contents), Glob (find files), and get_chat_history. Use them to verify claims by inspecting the files or messages referenced in the conversation. You CANNOT write, edit, send, browse the web, or run shell commands — you only read and reason.
+        summary: "a second-opinion audit of the current conversation — reads what the user asked and what the assistant actually said/did, then flags mistakes, wrong assumptions, and oversights. It can read and search files, query Warden's SQLite databases, and inspect the service logs to verify claims, but never changes anything. Runs in the background: calling it returns a job id immediately and the audit arrives in your inbox when it finishes. Call when the user wants a review or sanity-check, or before finalizing something important",
+        systemPrompt: `You are Artemis, a critical reviewer inside Warden. You are handed a transcript of a conversation between the user and the AI assistant (Warden). Your job is to audit it: read what the user actually asked and what the assistant said and did, and find mistakes, errors, and oversights. Your tools are for INSPECTION ONLY — Read (open a file), Grep (search file contents), Glob (find files), get_chat_history, and Bash for read-only inspection of system state. Use them to verify claims by inspecting the files, messages, databases, and logs referenced in the conversation. You audit — you never modify, send, or browse the web.
+
+BASH — READ-ONLY INSPECTION ONLY:
+- SQLite: the live Warden database is /home/dominic/Projects/Warden/store/messages.db (WAL mode — open it read-only: \`sqlite3 "file:/home/dominic/Projects/Warden/store/messages.db?mode=ro" "SELECT ..."\`). It holds chats, messages, registered_groups, sessions, scheduled_tasks, task_run_logs, user_work_tasks, dashboard_users, email_accounts, and more — use .tables and .schema <table> to explore. The .db files under data/ are empty stubs; store/messages.db is the real one.
+- Logs: the Warden service appends stdout to /home/dominic/Projects/Warden/logs/warden.log and stderr to /home/dominic/Projects/Warden/logs/warden.error.log — tail/grep these to see what the system actually did and when.
+- Allowed: SELECT queries, .tables/.schema, tail, grep, cat, ls, date. NEVER: INSERT/UPDATE/DELETE/DROP or any write pragma, file writes or shell redirection, sending anything, installing anything, or long-running/interactive commands.
 
 Look for:
 - Factual or logical errors in the assistant's replies.
@@ -693,9 +704,10 @@ const SUBAGENT_BY_DELEGATE = new Map<string, SubAgentDef>(SUBAGENTS.map(s => [s.
 
 const ORCHESTRATOR_SHARED_TOOLS = new Set<string>(['convert_file', 'api_request', 'list_api_keys']);
 
-// Artemis: read-only auditor tools
+// Artemis: read-only auditor tools (Bash included for read-only inspection:
+// sqlite3 queries against the store DB, reading service logs — never writes)
 const ARTEMIS_TOOL_DEFS = stripTier(
-    registry.getDefinitions(['Read', 'Grep', 'Glob', 'get_chat_history']),
+    registry.getDefinitions(['Read', 'Grep', 'Glob', 'Bash', 'get_chat_history']),
 );
 
 // The Council: three Artemis instances reason in parallel on the same question
@@ -831,15 +843,16 @@ const SUBAGENT_TOOL_DEFS = new Map<string, any[]>(
 
 // Delegate tool def handed to the main model in place of a sub-agent's raw tools.
 function delegateToolDef(s: SubAgentDef) {
-    // Atlas runs async by default: the call returns a job id immediately and the
-    // result lands in the orchestrator's inbox. Blocking mode remains for quick
-    // lookups the orchestrator cannot proceed without mid-turn.
-    if (s.delegate === 'atlas') {
+    // Atlas and artemis run async by default: the call returns a job id
+    // immediately and the result lands in the orchestrator's inbox. Blocking
+    // mode remains for quick lookups the orchestrator cannot proceed without
+    // mid-turn.
+    if (s.delegate === 'atlas' || s.delegate === 'artemis') {
         return {
             type: 'function',
             function: {
-                name: 'atlas',
-                description: `Delegate to ${s.label} for ${s.summary}. Atlas ALWAYS runs in the background. You get a job id back immediately and the full result arrives in your inbox when it finishes — keep working or end your turn in the meantime. Set urgent:true when the result should interrupt whatever you are doing at the time. NEVER use mode:"blocking".`,
+                name: s.delegate,
+                description: `Delegate to ${s.label} for ${s.summary}. ${s.label} ALWAYS runs in the background. You get a job id back immediately and the full result arrives in your inbox when it finishes — keep working or end your turn in the meantime. Set urgent:true when the result should interrupt whatever you are doing at the time. NEVER use mode:"blocking".`,
                 parameters: {
                     type: 'object',
                     properties: {
@@ -890,14 +903,14 @@ let councilLive: {
     verdictPath?: string;
     error?: string;
 } | null = null;
-// Background Atlas job — only one at a time
-// Multiple parallel Atlas jobs — the orchestrator can emit several `atlas`
-// tool calls in a single turn and they all run concurrently. Each completion
-// sends its own chat message back to the user, tagged with a short job ID so
-// the user can tell which Atlas finished.
-interface AtlasJob {
+// Multiple parallel background jobs (atlas, artemis) — the orchestrator can
+// emit several delegate tool calls in a single turn and they all run
+// concurrently. Each completion lands in the inbox, tagged with a short job ID
+// so the user can tell which job finished.
+interface BackgroundJob {
     promise: Promise<void>;
     startedAt: number;
+    agent: string;
     task: string;
     shortId: string;
     toolCallCount: number;
@@ -906,13 +919,13 @@ interface AtlasJob {
     abortFlag: { aborted: boolean };
     status: 'running' | 'done' | 'errored' | 'aborted';
 }
-const atlasBackgroundJobs = new Map<string, AtlasJob>();
-// Emit a live verbose-status line summarizing the Atlas background jobs currently
+const atlasBackgroundJobs = new Map<string, BackgroundJob>();
+// Emit a live verbose-status line summarizing the background jobs currently
 // running, including a `jobs` count the dashboard surfaces as its running-jobs
-// counter. Called on every Atlas tool call (so the bar reflects real, frequent
+// counter. Called on every job's tool calls (so the bar reflects real, frequent
 // progress) and on job start. Without this, the orchestrator's turn ends right
-// after it delegates to Atlas, the host clears liveStatus, and the dashboard reads
-// "idle" — even though Atlas is still working in the background.
+// after it delegates, the host clears liveStatus, and the dashboard reads
+// "idle" — even though the job is still working in the background.
 function emitAtlasJobsStatus() {
     const running = [...atlasBackgroundJobs.values()].filter(j => j.status === 'running');
     if (running.length === 0) return;
@@ -920,9 +933,9 @@ function emitAtlasJobsStatus() {
     const elapsed = Math.round((Date.now() - head.startedAt) / 1000);
     const sinceLast = Math.round((Date.now() - head.lastActionAt) / 1000);
     const label = running.length === 1
-        ? `atlas-${head.shortId}: ${head.lastAction} — ${head.toolCallCount} call(s), ${elapsed}s elapsed (last action ${sinceLast}s ago)`
-        : `Atlas: ${running.length} jobs running — atlas-${head.shortId}: ${head.lastAction} (+${running.length - 1} more)`;
-    writeStatus({ phase: 'atlas', label, jobs: running.length, ts: Date.now() });
+        ? `${head.agent}-${head.shortId}: ${head.lastAction} — ${head.toolCallCount} call(s), ${elapsed}s elapsed (last action ${sinceLast}s ago)`
+        : `${running.length} jobs running — ${head.agent}-${head.shortId}: ${head.lastAction} (+${running.length - 1} more)`;
+    writeStatus({ phase: head.agent, label, jobs: running.length, ts: Date.now() });
 }
 // Tool-calling sub-agent model (byte, dexter, iris) — from dashboard local:subagent_model.
 // The host always passes SUBAGENT_MODEL; the chain below is a last-resort default
@@ -1157,6 +1170,7 @@ async function runSubAgent(
             log(`[${agentName}] Per-job abort requested — stopping sub-agent after ${i} iteration(s)`);
             break;
         }
+        writeStatus({ phase: agentName, label: `${agentName}: iteration ${i + 1} — thinking`, ts: Date.now() });
         try {
             const provider = getProvider();
             // Trim history to fit context budget before each chat call.
@@ -1526,9 +1540,9 @@ ${input.memoryContext ? `\nLoaded memory:\n${input.memoryContext}\n` : ''}
 Answer directly, with no tools, for plain conversation, advice, definitions, translation, and summaries. Casual and social messages — greetings, thanks, banter, opinions, check-ins, quick factual questions you already know, simple math, rewording — get a direct spoken answer with zero tool calls and zero delegation. Mentioning a topic in passing (weather, news, a project) is not a request to act on it; delegate only when the user actually wants something done or looked up. For anything that does need tools or live data, delegate to the right specialist:
 
 - **iris** — email: read, send, search, save
-- **dexter** — scheduling, reminders, recurring tasks, alarms
+- **dexter** — scheduling, reminders, recurring tasks, alarms. Dexter ONLY creates, updates, and cancels schedule entries: you tell it WHAT should happen and WHEN, it calls its scheduling tools, done. It does not execute tasks and cannot explain why one did or didn't run — never ask it to
 - **byte** — projects, deliverables, blockers, financials, work tasks
-- **artemis** — audit or second opinion on the conversation
+- **artemis** — audit or second opinion on the conversation. Runs in the background like atlas: calling it returns a job id immediately and the audit arrives later in your INBOX as a new turn — end your turn after delegating, don't wait for it.
 - **council** — high-stakes decisions where being wrong is costly (see below)
 - **atlas** — everything else: anything hands-on that doesn't fit another specialist. Atlas always runs in the background; call it and move on.
 
@@ -1550,6 +1564,7 @@ Anti-patterns (observed — do not repeat):
 - User asked about an email; the orchestrator called activate_skill('iris') and told the user the email tool was unavailable. Wrong — iris is a delegate tool, always available; call iris with a {task}.
 - "Find that email with order #48215 and pull out the tracking info" was sent to atlas as a filesystem search for "48215". Wrong — order confirmations live in the inbox; that is an iris task.
 - "Summarize my inbox every morning" was answered by summarizing the inbox once. Wrong — "every morning" means dexter creates the recurring task.
+- A scheduled task didn't fire and the orchestrator delegated to dexter to investigate why. Wrong — dexter only manages schedule entries and cannot diagnose or explain past behavior; use artemis to audit what happened, and call dexter only if the schedule entry itself needs to be fixed or recreated.
 
 When in doubt, delegate to atlas. Only answer directly when no tools are needed. If the user asks what you can do or what tools you have, run the \`self-check\` skill (\`activate_skill('self-check')\`) and report what it finds.
 
@@ -1568,7 +1583,7 @@ Bad: "call read_emails with query=amazon, then get_email on the newest result, t
 Good: "In classroom/public/index.html the login form refreshes instead of submitting — find the cause, fix it, and confirm the fix."
 
 Emit multiple delegate calls in one turn when the requests are independent — they run in parallel. Serialize only when one result feeds the next.
-**Atlas is always async:** calling atlas returns a job id immediately and the full result arrives later in your INBOX as a new turn — digest it in your own voice (report what matters, or silently use it to start the next task; never paste raw output — the user can ask, and you can read_job_result, if they want it verbatim). You are free to take new user messages while jobs run. NEVER use mode:"blocking". Add urgent:true when the finished result should interrupt whatever you are doing instead of waiting for your turn to end.
+**Atlas and artemis are always async:** calling either returns a job id immediately and the full result arrives later in your INBOX as a new turn — digest it in your own voice (report what matters, or silently use it to start the next task; never paste raw output — the user can ask, and you can read_job_result, if they want it verbatim). You are free to take new user messages while jobs run. NEVER use mode:"blocking". Add urgent:true when the finished result should interrupt whatever you are doing instead of waiting for your turn to end.
 
 Split multi-domain requests across delegates — never stuff the whole request into one task. "Get the price and remind me tomorrow" is TWO calls: atlas fetches the price, then dexter gets a task containing the fetched number. Scheduling NEVER goes inside an atlas task (atlas has no scheduler and will improvise badly). And never re-delegate work a sub-agent already completed — take its result and move to the next step.
 
@@ -1590,7 +1605,7 @@ Don't trail off mid-task, don't repeat a call you already made, and don't claim 
 
 # OUTPUT
 
-Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, backticks, bold, or headers; those characters get read aloud and sound wrong. One to three sentences for most replies; yes/no first when asked a yes/no question. Don't read out lists unless asked. Relay only the spoken answer from sub-agents, not raw output, paths, or JSON. No emoji, no "let me know if you need anything else," no apologies. If the user is frustrated, just the answer. When you delegate hands-on work, your final reply should name the action and the outcome in a sentence — for example, that you had Atlas pause the video and it's paused now — so the user hears what was done, not just the result.
+Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, backticks, bold, or headers; those characters get read aloud and sound wrong. One to three sentences for most replies; yes/no first when asked a yes/no question. Don't read out lists unless asked. Relay only the spoken answer from sub-agents, not raw output, paths, or JSON. No emoji, no "let me know if you need anything else," no apologies. If the user is frustrated, just the answer. When you delegate hands-on work, your final reply should name the action and the outcome in a sentence — for example, that the file was converted and where it landed — so the user hears what was done, not just the result. EXCEPTION — media playback: playing or pausing a video or song gets no completion announcement at all; the user sees and hears it happen on screen, so saying "it's playing now" is noise. Stay silent when it succeeds; say something only if it failed.
 
 `;
     // Fabric pattern exposure (deferred pattern): list the top-ranked relevant
@@ -2458,7 +2473,11 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
             if (unreadItems.length > 0) {
                 for (const item of unreadItems) inbox.markRead(item.jobId);
                 const lines = unreadItems.map(i => inbox.summaryLine(i)).join('\n');
-                nextInput = `[Inbox] ${unreadItems.length} background job result${unreadItems.length > 1 ? 's' : ''} arrived:\n${lines}\n\nFull outputs are available via read_job_result {job_id}. Digest these in your own voice: tell the user what matters (or nothing, if it only feeds later work), and start any follow-up tasks the results call for. Do not paste raw output verbatim.`;
+                const hasFailures = unreadItems.some(i => i.status === 'errored' || i.status === 'aborted');
+                const failureInstr = hasFailures
+                    ? `\n\nOne or more jobs are marked [ERRORED] or [ABORTED]. For each: read its full output with read_job_result, work out why it failed, and retry it yourself by calling atlas with a reworked task prompt that addresses the failure (different approach, missing detail, corrected URL/path — whatever the output shows was wrong). Do not ask me first. EXCEPTION: if your recent context shows the same task has already failed twice, stop retrying and tell me what failed and why.`
+                    : '';
+                nextInput = `[Inbox] ${unreadItems.length} background job result${unreadItems.length > 1 ? 's' : ''} arrived:\n${lines}\n\nFull outputs are available via read_job_result {job_id}. Digest these in your own voice: tell the user what matters (or nothing, if it only feeds later work), and start any follow-up tasks the results call for. Do not paste raw output verbatim. If a job's task was playing, pausing, or otherwise controlling media (YouTube, music, a video), send NOTHING to the user on success — the result is visible on their screen; speak up only if that job FAILED.${failureInstr}`;
                 log(`[inbox] draining ${unreadItems.length} item(s) into a digest turn`);
                 break;
             }
@@ -2466,11 +2485,17 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
             if (runningJobs.length === 0) {
                 // No running jobs — wait for IPC, but wake if an inbox item lands
                 // (e.g. a job finished right at the turn boundary).
+                const idleIpcCancel = { cancelled: false };
                 const winner = await Promise.race([
-                    waitForIpcMessageWithTimeout(IDLE_TIMEOUT_MS).then(v => v as string | null),
+                    waitForIpcMessageWithTimeout(IDLE_TIMEOUT_MS, idleIpcCancel).then(v => v as string | null),
                     inbox.waitForItem().then(() => '__INBOX_ITEM__' as const),
                 ]);
-                if (winner === '__INBOX_ITEM__') continue; // loop back to the drain check
+                if (winner === '__INBOX_ITEM__') {
+                    // Cancel the losing IPC poller — otherwise it stays alive and
+                    // drains (deletes) the next user message into the void.
+                    idleIpcCancel.cancelled = true;
+                    continue; // loop back to the drain check
+                }
                 nextInput = winner;
                 if (!nextInput) {
                     log('Idle timeout or close signal — exiting.');
@@ -2486,16 +2511,20 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
             const tickPromise = new Promise<'__MONITOR_TICK__'>((resolve) => {
                 monitorTimer = setTimeout(() => resolve('__MONITOR_TICK__'), MONITOR_TICK_MS);
             });
-            const ipcPromise = waitForIpcMessageWithTimeout(IDLE_TIMEOUT_MS).then(v => v as string | null);
+            const ipcCancel = { cancelled: false };
+            const ipcPromise = waitForIpcMessageWithTimeout(IDLE_TIMEOUT_MS, ipcCancel).then(v => v as string | null);
             const inboxPromise = inbox.waitForItem().then(() => '__INBOX_ITEM__' as const);
             const winner = await Promise.race([ipcPromise, tickPromise, inboxPromise]);
             if (winner === '__INBOX_ITEM__') {
                 // A job just finished — loop back so the drain check picks it up
-                // without waiting for the next monitor tick.
+                // without waiting for the next monitor tick. Cancel the losing IPC
+                // poller so it can't swallow the next user message.
+                ipcCancel.cancelled = true;
                 if (monitorTimer) { clearTimeout(monitorTimer); monitorTimer = null; }
                 continue;
             }
             if (winner === '__MONITOR_TICK__') {
+                ipcCancel.cancelled = true;
                 monitorTimer = null;
                 const stillRunning = [...atlasBackgroundJobs.values()].filter(j => j.status === 'running');
                 if (stillRunning.length === 0) {
@@ -2505,9 +2534,9 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
                 const jobLines = stillRunning.map(j => {
                     const elapsed = Math.round((Date.now() - j.startedAt) / 1000);
                     const sinceLast = Math.round((Date.now() - j.lastActionAt) / 1000);
-                    return `- atlas-${j.shortId}: ${elapsed}s elapsed, ${j.toolCallCount} tool call(s), last action ${sinceLast}s ago (${j.lastAction}). Task: "${j.task.slice(0, 160)}"`;
+                    return `- ${j.agent}-${j.shortId}: ${elapsed}s elapsed, ${j.toolCallCount} tool call(s), last action ${sinceLast}s ago (${j.lastAction}). Task: "${j.task.slice(0, 160)}"`;
                 }).join('\n');
-                const synthetic = `[System monitor tick #${tickNum}] You have ${stillRunning.length} background Atlas job(s) still running:\n${jobLines}\n\nEvaluate each one without me asking: is it making progress, stuck, or doing the wrong thing? If it is stuck or doing the wrong thing, call stop_agent with its job id (atlas-XXXX) and tell me briefly what you stopped and why. If it looks fine, reply with one short sentence saying so and stop calling tools. Do not relay this tick to me as a regular message — only reply if you are stopping a job or have a real concern.`;
+                const synthetic = `[System monitor tick #${tickNum}] You have ${stillRunning.length} background job(s) still running:\n${jobLines}\n\nEvaluate each one without me asking: is it making progress, stuck, or doing the wrong thing? If it is stuck or doing the wrong thing, call stop_agent with its job id (e.g. atlas-XXXX) and tell me briefly what you stopped and why. If it looks fine, reply with one short sentence saying so and stop calling tools. Do not relay this tick to me as a regular message — only reply if you are stopping a job or have a real concern.`;
                 log(`[orchestrator-monitor] tick #${tickNum} fired with ${stillRunning.length} running job(s)`);
                 nextInput = synthetic;
                 break;
@@ -2667,30 +2696,77 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
 
     // Sub-agent delegates: dispatch to runSubAgent with their tool defs
     if (toolName === 'artemis') {
+        // Async artemis: start the audit as a background job (same pattern as
+        // atlas), return immediately, result lands in the inbox.
         const def = SUBAGENT_BY_DELEGATE.get('artemis')!;
         const focus = ((args.task as string) || '').trim();
-        writeStatus({ phase: 'artemis', label: `${def.label}: reviewing the conversation...`, ts: Date.now() });
-        writeIpcFile(TASKS_DIR, { type: 'get_chat_history', chatJid: context.chatJid, limit: 20, timestamp: new Date().toISOString() });
-        const history = await waitForResult('chat-history-');
-        // History is chronological (oldest→newest). Keep the END of the transcript so the
-        // MOST RECENT messages always survive the budget — Artemis audits the latest
-        // exchange, not the oldest. Older messages drop off the top if over budget.
-        const transcript = history ? JSON.stringify(history, null, 2).slice(-12000) : '(conversation history unavailable)';
-        const auditTask = `${focus ? `Focus your audit on: ${focus}\n\n` : ''}Audit the following conversation (most recent messages last). Each entry has a sender_name and an is_bot_message flag — is_bot_message=1 is the AI assistant, otherwise it's the user.\n\n${transcript}`;
-        const artemisResult = await runSubAgent('artemis', ATLAS_MODEL, def.systemPrompt, ARTEMIS_TOOL_DEFS, auditTask, context, def.maxIterations);
-        for (const f of artemisResult.modifiedFiles) modifiedFiles?.add(f);
-        let savedTo = '';
-        try {
-            const notesPath = path.join(process.cwd(), 'ARTEMIS_NOTES.md');
-            const stamp = new Date().toISOString();
-            const entry = `## ${stamp}\n${focus ? `_Focus: ${focus}_\n\n` : ''}${artemisResult.content}\n\n---\n\n`;
-            fs.appendFileSync(notesPath, entry);
-            savedTo = 'ARTEMIS_NOTES.md';
-        } catch (err: any) {
-            log(`[artemis] failed to save notes: ${err.message}`);
-        }
-        writeStatus({ phase: 'artemis', label: `${def.label} complete`, ts: Date.now() });
-        result = savedTo ? `${artemisResult.content}\n\n(Artemis's notes saved to ${savedTo})` : artemisResult.content;
+        const jobShortId = Math.random().toString(36).slice(2, 6);
+        const jobId = `artemis-${jobShortId}`;
+        const urgent = args.urgent === true;
+        writeStatus({ phase: 'artemis', label: `${def.label} ${jobShortId}: reviewing the conversation...`, ts: Date.now() });
+        const abortFlag = { aborted: false };
+        const jobRecord: BackgroundJob = {
+            promise: null as any,
+            startedAt: Date.now(),
+            agent: 'artemis',
+            task: focus || 'audit the conversation',
+            shortId: jobShortId,
+            toolCallCount: 0,
+            lastAction: 'starting',
+            lastActionAt: Date.now(),
+            abortFlag,
+            status: 'running',
+        };
+        const job = (async () => {
+            writeIpcFile(TASKS_DIR, { type: 'get_chat_history', chatJid: context.chatJid, limit: 20, timestamp: new Date().toISOString() });
+            const history = await waitForResult('chat-history-');
+            // History is chronological (oldest→newest). Keep the END of the transcript so the
+            // MOST RECENT messages always survive the budget — Artemis audits the latest
+            // exchange, not the oldest. Older messages drop off the top if over budget.
+            const transcript = history ? JSON.stringify(history, null, 2).slice(-12000) : '(conversation history unavailable)';
+            const auditTask = `${focus ? `Focus your audit on: ${focus}\n\n` : ''}Audit the following conversation (most recent messages last). Each entry has a sender_name and an is_bot_message flag — is_bot_message=1 is the AI assistant, otherwise it's the user.\n\n${transcript}`;
+            const artemisResult = await runSubAgent('artemis', ATLAS_MODEL, def.systemPrompt, ARTEMIS_TOOL_DEFS, auditTask, context, def.maxIterations, abortFlag, (tName, argsSummary) => {
+                jobRecord.toolCallCount++;
+                jobRecord.lastAction = `${tName}(${argsSummary})`;
+                jobRecord.lastActionAt = Date.now();
+                emitAtlasJobsStatus();
+            });
+            if (artemisResult.modifiedFiles.length > 0) log(`[artemis] Tracked ${artemisResult.modifiedFiles.length} modified file(s): ${artemisResult.modifiedFiles.join(', ')}`);
+            let savedTo = '';
+            try {
+                const notesPath = path.join(process.cwd(), 'ARTEMIS_NOTES.md');
+                const stamp = new Date().toISOString();
+                const entry = `## ${stamp}\n${focus ? `_Focus: ${focus}_\n\n` : ''}${artemisResult.content}\n\n---\n\n`;
+                fs.appendFileSync(notesPath, entry);
+                savedTo = 'ARTEMIS_NOTES.md';
+            } catch (err: any) {
+                log(`[artemis] failed to save notes: ${err.message}`);
+            }
+            writeStatus({ phase: 'artemis', label: `${def.label} ${jobShortId} complete`, ts: Date.now() });
+            if (jobRecord.status === 'running') jobRecord.status = 'done';
+            const content = artemisResult.content || 'Artemis completed the audit (no text output).';
+            inbox.push({
+                jobId, agent: 'artemis', task: jobRecord.task, urgent,
+                status: jobRecord.abortFlag.aborted ? 'aborted' : 'done',
+                fullResult: savedTo ? `${content}\n\n(Artemis's notes saved to ${savedTo})` : content,
+            });
+        })()
+            .catch(err => {
+                if (jobRecord.status === 'running') jobRecord.status = 'errored';
+                inbox.push({
+                    jobId, agent: 'artemis', task: jobRecord.task, urgent,
+                    status: 'errored',
+                    fullResult: `Error: ${err?.message ?? err}`,
+                });
+            })
+            .finally(() => {
+                if (jobRecord.status === 'running') jobRecord.status = 'done';
+                setTimeout(() => { atlasBackgroundJobs.delete(jobId); }, 60000).unref?.();
+            });
+        jobRecord.promise = job;
+        atlasBackgroundJobs.set(jobId, jobRecord);
+        emitAtlasJobsStatus();
+        result = `Artemis ${jobShortId} started${urgent ? ' (urgent — its result will interrupt you when ready)' : ''} — the audit result will arrive in your inbox. (job id: ${jobId})`;
     } else if (toolName === 'council') {
         const task = ((args.task as string) || '').trim();
         const maxRounds = Math.min(Math.max(Number(args.max_rounds ?? 4), 1), 7);
@@ -2862,9 +2938,10 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
             const activeCount = atlasBackgroundJobs.size;
             writeStatus({ phase: 'atlas', label: `Atlas ${jobShortId}: ${task.slice(0, 50)}...${activeCount > 0 ? ` (${activeCount} running)` : ''}`, ts: Date.now() });
             const abortFlag = { aborted: false };
-            const jobRecord: AtlasJob = {
+            const jobRecord: BackgroundJob = {
                 promise: null as any,
                 startedAt: Date.now(),
+                agent: 'atlas',
                 task,
                 shortId: jobShortId,
                 toolCallCount: 0,
@@ -2953,14 +3030,14 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
     } else if (toolName === 'list_running_agents') {
         const entries = [...atlasBackgroundJobs.values()].filter(j => j.status === 'running');
         if (entries.length === 0) {
-            result = 'No background Atlas jobs currently running.';
+            result = 'No background jobs currently running.';
         } else {
             const lines = entries.map(j => {
                 const elapsed = Math.round((Date.now() - j.startedAt) / 1000);
                 const sinceLast = Math.round((Date.now() - j.lastActionAt) / 1000);
-                return `- ${j.shortId} (job id: atlas-${j.shortId}): ${elapsed}s elapsed, ${j.toolCallCount} tool call(s), last action ${sinceLast}s ago: ${j.lastAction} | task: "${j.task.slice(0, 140)}"`;
+                return `- ${j.shortId} (job id: ${j.agent}-${j.shortId}): ${elapsed}s elapsed, ${j.toolCallCount} tool call(s), last action ${sinceLast}s ago: ${j.lastAction} | task: "${j.task.slice(0, 140)}"`;
             });
-            result = `Running Atlas jobs (${entries.length}):\n${lines.join('\n')}`;
+            result = `Running background jobs (${entries.length}):\n${lines.join('\n')}`;
         }
     } else if (toolName === 'stop_agent') {
         const targetId = String(args?.job_id || '');
@@ -2976,17 +3053,25 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
                 job.abortFlag.aborted = true;
                 job.status = 'aborted';
                 log(`[orchestrator] stop_agent: abort flag set for ${targetId}`);
-                result = `Stop signal sent to Atlas ${targetId}. It will return its partial result on the next iteration check.`;
+                result = `Stop signal sent to ${targetId}. It will return its partial result on the next iteration check.`;
             }
         }
     } else if (toolName === 'schedule_task' || toolName === 'cancel_task' || toolName === 'pause_task' || toolName === 'resume_task' || toolName === 'update_task') {
-        // Scheduling tools are parent-routed: the agent-runner emits a CALLBACK
-        // block and the parent process creates/updates the DB record.
-        writeCallback(toolName, args);
-        if (toolName === 'schedule_task') {
-            result = JSON.stringify({ ok: true, message: 'Task scheduled. The task has been created and will run at the specified time.' });
-        } else {
-            result = JSON.stringify({ ok: true, message: `${toolName} completed.` });
+        // Scheduling tools are parent-routed and must report the parent's REAL
+        // result: the parent creates/updates the DB record and returns
+        // { ok, taskId } or { ok: false, error }. The old fire-and-forget
+        // writeCallback fabricated success even when the DB insert failed.
+        try {
+            const cbResult = await writeCallbackAsync(toolName, args, 15000);
+            if (cbResult?.ok) {
+                result = JSON.stringify(toolName === 'schedule_task'
+                    ? { ok: true, taskId: cbResult.taskId, message: `Task scheduled (id: ${cbResult.taskId}). It will run at the specified time.` }
+                    : { ok: true, message: `${toolName} completed.` });
+            } else {
+                result = JSON.stringify({ ok: false, error: cbResult?.error || `${toolName} failed in the parent process` });
+            }
+        } catch (err: any) {
+            result = JSON.stringify({ ok: false, error: `${toolName} callback failed: ${err?.message ?? err}` });
         }
     } else if (toolName === 'list_tasks') {
         // list_tasks is also parent-routed — only the parent has DB access.
@@ -3033,10 +3118,17 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
 /**
  * Wait for IPC message or _close sentinel with timeout
  */
-function waitForIpcMessageWithTimeout(timeoutMs) {
+function waitForIpcMessageWithTimeout(timeoutMs, cancelToken?: { cancelled: boolean }) {
     return new Promise((resolve) => {
         let start = Date.now();
         const poll = () => {
+            // Cancelled by the race loop (monitor tick / inbox item won) — stop
+            // WITHOUT draining. An orphaned poller that keeps draining would
+            // swallow the next user message into a race that already resolved.
+            if (cancelToken?.cancelled) {
+                resolve(null);
+                return;
+            }
             // Check for _close sentinel
             if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
                 try {

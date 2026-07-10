@@ -359,7 +359,6 @@ export function buildAgentCallbacks(): CallbackMap {
         const now = new Date().toISOString();
         const task: ScheduledTask = {
           id: taskId,
-          group_folder: 'owner',
           chat_jid: OWNER_JID,
           prompt,
           schedule_type: scheduleType,
@@ -370,8 +369,6 @@ export function buildAgentCallbacks(): CallbackMap {
           last_result: null,
           status: 'active',
           created_at: now,
-          model: null,
-          user_id: null,
         };
         task.next_run = computeNextRun(task);
         createTask(task);
@@ -1193,17 +1190,9 @@ async function startMessageLoop(): Promise<void> {
             // after the stop stay pending and start a fresh run.
             lastAgentTimestamp = stopMsg.timestamp;
             saveState();
-          } else {
-            // Any new user message during a run interrupts the current turn.
-            // The user is never left waiting on a stuck or slow model/tool call;
-            // their new input takes priority. Background Atlas jobs continue
-            // independently and report back via inbox.
-            const interruptMsg = messages[messages.length - 1];
-            logger.info({ ts: interruptMsg.timestamp }, 'New message mid-run — interrupting current turn');
-            killCurrentAgent();
-            lastAgentTimestamp = interruptMsg.timestamp;
-            saveState();
           }
+          // Non-stop messages queue as before: processOwnerMessages picks
+          // them up via lastAgentTimestamp once the current run resolves.
         }
       }
       if (!agentRunInFlight) {
@@ -1489,45 +1478,16 @@ async function main(): Promise<void> {
     },
   });
 
-  // Start the scheduled-task loop. Task 8 will replace the queue/group deps
-  // with a callback-based interface; for now we pass a minimal stub.
+  // Start the scheduled-task loop. The scheduler no longer runs agents — it
+  // injects each due task's prompt into the owner chat as a regular message
+  // (attributed to Automation) and lets the normal message pipeline handle it.
+  // The message loop polls the owner chat every POLL_INTERVAL, so the injected
+  // prompt is picked up without an explicit poke; enqueueMessageCheck is a
+  // no-op here (it exists for the GroupQueue architecture).
   startSchedulerLoop({
     registeredGroups: () => ({ [OWNER_JID]: { name: 'Owner', folder: 'owner', trigger: '', added_at: '', isMain: true, requiresTrigger: false } }) as any,
-    getSessions: () => ({}),
-    queue: { enqueueTask: (_jid: string, _id: string, fn: () => Promise<void>) => { void fn(); } },
-    sendMessage: async (_jid: string, text: string) => {
-      const cleaned = formatOutbound(text);
-      if (!cleaned) return;
-      storeMessage({
-        id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-        chat_jid: OWNER_JID,
-        sender: 'assistant',
-        sender_name: ASSISTANT_NAME,
-        content: cleaned,
-        timestamp: new Date().toISOString(),
-        is_from_me: false,
-        is_bot_message: true,
-      });
-      for (const ch of channels) {
-        try { await ch.sendMessage(OWNER_JID, cleaned); } catch (err) {
-          logger.warn({ channel: ch.name, err }, 'Task scheduler: channel send failed');
-        }
-      }
-    },
-    onTaskResult: (_task: unknown, result: string) => {
-      // Agent output arrives as the raw {"status","result"} JSON envelope —
-      // unwrap it so the notification shows the actual text, not JSON.
-      let text = result;
-      try {
-        const parsed = JSON.parse(result);
-        if (parsed && typeof parsed.result === 'string') text = parsed.result;
-      } catch { /* already plain text */ }
-      pushNotification('owner', {
-        type: 'task',
-        message: text.length > 120 ? text.slice(0, 120) + '...' : text,
-      });
-    },
-  } as any);
+    queue: { enqueueMessageCheck: () => {} },
+  });
 
   startCalendarSyncPoller();
   // Kontact projection: mirror project deliverables to/from the shared

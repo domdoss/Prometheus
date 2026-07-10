@@ -2,7 +2,7 @@
   "name": "Warden — AI Assistant",
   "short_name": "Warden",
   "description": "Your personal AI assistant with shared terminal, browser, and workspace. Chat, build, and deploy from anywhere.",
-  "id": "warden-dashboard",
+  "id": "dockbox-dashboard",
   "start_url": "/user/",
   "scope": "/",
   "display": "standalone",
@@ -80,7 +80,7 @@
   "prefer_related_applications": false,
   "related_applications": [],
   "scope_extensions": [
-    {"origin": "https://*.warden.local"}
+    {"origin": "https://*.dockbox.dev"}
   ],
   "file_handlers": [
     {
@@ -95,7 +95,7 @@
   ],
   "protocol_handlers": [
     {
-      "protocol": "web+warden",
+      "protocol": "web+dockbox",
       "url": "/user/?action=%s"
     }
   ],
@@ -125,7 +125,7 @@
     {
       "name": "Warden Chat",
       "description": "Quick access to your AI assistant",
-      "tag": "warden-chat",
+      "tag": "dockbox-chat",
       "ms_ac_template": "widget/chat.json",
       "screenshots": [{"src": "/icons/icon-512.png", "sizes": "512x512"}],
       "icons": [{"src": "/icons/icon-192.png", "sizes": "192x192"}]

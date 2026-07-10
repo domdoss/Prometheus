@@ -280,11 +280,19 @@ async function handleCallback(raw: string) {
   const id = parsed.id;
   if (!tool) { writeCallbackResponse({ id, error: 'missing tool field' }); return; }
   const handler = agentState.callbacks[tool];
-  if (!handler) { writeCallbackResponse({ id, error: `no handler for tool: ${tool}` }); return; }
+  if (!handler) {
+    logger.warn({ tool }, 'agent-spawn: callback with no registered handler');
+    writeCallbackResponse({ id, error: `no handler for tool: ${tool}` });
+    return;
+  }
   try {
     const result = await handler(parsed.args);
+    if (result && (result as any).ok === false) {
+      logger.warn({ tool, error: (result as any).error }, 'agent-spawn: callback handler returned error');
+    }
     writeCallbackResponse({ id, ...result });
   } catch (err: any) {
+    logger.warn({ tool, err }, 'agent-spawn: callback handler threw');
     writeCallbackResponse({ id, ok: false, error: err?.message ?? String(err) });
   }
 }

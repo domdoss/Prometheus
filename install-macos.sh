@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Jarvis (dockbox) — macOS installer. Run from the unzipped repo root:
-#   cd jarvis && bash install-macos.sh
+# Warden (warden) — macOS installer. Run from the unzipped repo root:
+#   cd warden && bash install-macos.sh
 # Installs system deps (Homebrew), builds, provisions Radicale, and loads
 # both services as launchd LaunchAgents (auto-start on login, keep-alive).
 set -euo pipefail
@@ -14,7 +14,7 @@ die()  { echo -e "  ${RED}✗${NC} $1"; exit 1; }
 [ -f package.json ] || die "Run from the repo root (package.json not found)."
 REPO="$(pwd)"
 
-echo -e "\n${BOLD}Jarvis macOS install${NC}\n"
+echo -e "\n${BOLD}Warden macOS install${NC}\n"
 
 # ── 1. Xcode Command Line Tools (node-pty compiles native code) ─────────
 if ! xcode-select -p >/dev/null 2>&1; then
@@ -59,12 +59,12 @@ ok "Dependencies installed, TypeScript built"
 mkdir -p data/env
 if [ ! -f data/env/env ]; then
   cat > data/env/env <<EOF
-# Jarvis config — fill in and re-run: launchctl kickstart -k gui/$(id -u)/com.jarvis.dockbox
+# Warden config — fill in and re-run: launchctl kickstart -k gui/$(id -u)/com.warden.warden
 CLAUDE_CODE_OAUTH_TOKEN=
 TELEGRAM_BOT_TOKEN=
-ASSISTANT_NAME=Jarvis
+ASSISTANT_NAME=Warden
 TZ=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
-WORKSPACE_ROOT=$HOME/Documents/Jarvis
+WORKSPACE_ROOT=$HOME/Documents/Warden
 AGENT_TIMEOUT=1800000
 IDLE_TIMEOUT=1800000
 OLLAMA_URL=http://127.0.0.1:11434
@@ -76,7 +76,7 @@ EOF
 else
   ok "data/env/env already present (brought over from the old box?)"
 fi
-mkdir -p "$HOME/Documents/Jarvis"
+mkdir -p "$HOME/Documents/Warden"
 
 # ── 6. Radicale (PIM hub) ───────────────────────────────────────────────
 if [ -n "$RADICALE_BIN" ]; then
@@ -96,39 +96,39 @@ type = authenticated
 filesystem_folder = ~/.local/share/radicale/collections
 EOF
   fi
-  cat > "$HOME/Library/LaunchAgents/com.jarvis.radicale.plist" <<EOF
+  cat > "$HOME/Library/LaunchAgents/com.warden.radicale.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.jarvis.radicale</string>
+  <key>Label</key><string>com.warden.radicale</string>
   <key>ProgramArguments</key><array><string>${RADICALE_BIN}</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
 </dict></plist>
 EOF
-  launchctl bootout "gui/$(id -u)/com.jarvis.radicale" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.jarvis.radicale.plist" 2>/dev/null \
-    || launchctl load -w "$HOME/Library/LaunchAgents/com.jarvis.radicale.plist"
+  launchctl bootout "gui/$(id -u)/com.warden.radicale" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.warden.radicale.plist" 2>/dev/null \
+    || launchctl load -w "$HOME/Library/LaunchAgents/com.warden.radicale.plist"
   sleep 2
   # Collections (idempotent — 201 created / 405 exists are both fine)
-  curl -su dominic:jarvis -X MKCOL http://127.0.0.1:5232/dominic/cal/ -H "Content-Type: application/xml" \
-    -d '<?xml version="1.0"?><create xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><set><prop><resourcetype><collection/><C:calendar/></resourcetype><displayname>Jarvis Calendar</displayname></prop></set></create>' \
+  curl -su dominic:warden -X MKCOL http://127.0.0.1:5232/dominic/cal/ -H "Content-Type: application/xml" \
+    -d '<?xml version="1.0"?><create xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><set><prop><resourcetype><collection/><C:calendar/></resourcetype><displayname>Warden Calendar</displayname></prop></set></create>' \
     -o /dev/null || true
-  curl -su dominic:jarvis -X MKCOL http://127.0.0.1:5232/dominic/card/ -H "Content-Type: application/xml" \
-    -d '<?xml version="1.0"?><create xmlns="DAV:" xmlns:CR="urn:ietf:params:xml:ns:carddav"><set><prop><resourcetype><collection/><CR:addressbook/></resourcetype><displayname>Jarvis Contacts</displayname></prop></set></create>' \
+  curl -su dominic:warden -X MKCOL http://127.0.0.1:5232/dominic/card/ -H "Content-Type: application/xml" \
+    -d '<?xml version="1.0"?><create xmlns="DAV:" xmlns:CR="urn:ietf:params:xml:ns:carddav"><set><prop><resourcetype><collection/><CR:addressbook/></resourcetype><displayname>Warden Contacts</displayname></prop></set></create>' \
     -o /dev/null || true
   # Env wiring (append only if missing)
   grep -q RADICALE_URL data/env/env || cat >> data/env/env <<EOF
 RADICALE_URL=http://127.0.0.1:5232
 RADICALE_USER=dominic
-RADICALE_PASS=jarvis
+RADICALE_PASS=warden
 RADICALE_CAL_COLLECTION=/dominic/cal/
 RADICALE_CARD_COLLECTION=/dominic/card/
 RADICALE_STORAGE_DIR=$HOME/.local/share/radicale/collections
 EOF
   ok "Radicale running on 127.0.0.1:5232 (calendar + contacts collections ready)"
   echo -e "    ${YELLOW}Apple Calendar:${NC} Settings → Internet Accounts → Add Other → CalDAV →"
-  echo -e "    server 127.0.0.1:5232, user dominic, any password → subscribes to Jarvis's calendar."
+  echo -e "    server 127.0.0.1:5232, user dominic, any password → subscribes to Warden's calendar."
 fi
 
 # ── 6b. MCP server config: fix Linux paths for this machine ─────────────
@@ -142,7 +142,7 @@ p = 'data/mcp-servers.json'
 servers = json.load(open(p))
 home, repo = os.path.expanduser('~'), os.getcwd()
 for s in servers:
-    s['args'] = [a.replace('/home/dominic/dockbox', repo).replace('/home/dominic', home) for a in s.get('args', [])]
+    s['args'] = [a.replace('/home/dominic/warden', repo).replace('/home/dominic', home) for a in s.get('args', [])]
     if s.get('name') == 'plasma':
         s['enabled'] = False   # KDE Plasma notifications — no-op on macOS
         s.setdefault('notes', '')
@@ -153,13 +153,13 @@ PYEOF
   ok "MCP servers configured (npx/uvx entries self-install on first use)"
 fi
 
-# ── 7. Jarvis LaunchAgent ───────────────────────────────────────────────
+# ── 7. Warden LaunchAgent ───────────────────────────────────────────────
 NODE_BIN="$(command -v node)"
-cat > "$HOME/Library/LaunchAgents/com.jarvis.dockbox.plist" <<EOF
+cat > "$HOME/Library/LaunchAgents/com.warden.warden.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.jarvis.dockbox</string>
+  <key>Label</key><string>com.warden.warden</string>
   <key>ProgramArguments</key><array>
     <string>${NODE_BIN}</string>
     <string>dist/index.js</string>
@@ -172,32 +172,32 @@ cat > "$HOME/Library/LaunchAgents/com.jarvis.dockbox.plist" <<EOF
          ollama are invisible to spawned children. -->
     <key>PATH</key><string>${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
-  <key>StandardOutPath</key><string>${REPO}/logs/dockbox.log</string>
-  <key>StandardErrorPath</key><string>${REPO}/logs/dockbox.error.log</string>
+  <key>StandardOutPath</key><string>${REPO}/logs/warden.log</string>
+  <key>StandardErrorPath</key><string>${REPO}/logs/warden.error.log</string>
 </dict></plist>
 EOF
 mkdir -p logs
-launchctl bootout "gui/$(id -u)/com.jarvis.dockbox" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.jarvis.dockbox.plist" 2>/dev/null \
-  || launchctl load -w "$HOME/Library/LaunchAgents/com.jarvis.dockbox.plist"
+launchctl bootout "gui/$(id -u)/com.warden.warden" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.warden.warden.plist" 2>/dev/null \
+  || launchctl load -w "$HOME/Library/LaunchAgents/com.warden.warden.plist"
 sleep 4
 
 # ── 8. Health check ─────────────────────────────────────────────────────
 if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3200/api/health | grep -q 200; then
-  ok "Jarvis is up — dashboard: http://localhost:3200"
+  ok "Warden is up — dashboard: http://localhost:3200"
 else
-  warn "Service loaded but health check failed — check logs/dockbox.error.log"
+  warn "Service loaded but health check failed — check logs/warden.error.log"
   warn "Most common cause: missing API token in data/env/env. After fixing:"
-  warn "  launchctl kickstart -k gui/$(id -u)/com.jarvis.dockbox"
+  warn "  launchctl kickstart -k gui/$(id -u)/com.warden.warden"
 fi
 
 echo -e "
 ${BOLD}Done. Notes:${NC}
-  • Restart:  launchctl kickstart -k gui/$(id -u)/com.jarvis.dockbox
-  • Stop:     launchctl bootout gui/$(id -u)/com.jarvis.dockbox
+  • Restart:  launchctl kickstart -k gui/$(id -u)/com.warden.warden
+  • Stop:     launchctl bootout gui/$(id -u)/com.warden.warden
   • Grant ${BOLD}Accessibility${NC} + ${BOLD}Screen Recording${NC} to '${NODE_BIN}' in
     System Settings → Privacy & Security (needed for desktop control/screenshots).
   • Desktop-control + native notifications need the code changes in
-    MACOS_PORT_PLAN.md (Tasks 2 & 4) — hand that file to Jarvis to apply.
+    MACOS_PORT_PLAN.md (Tasks 2 & 4) — hand that file to Warden to apply.
   • Ollama (local models): install from ollama.com if you use local models.
 "

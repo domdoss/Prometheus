@@ -1973,12 +1973,7 @@ async function handleTasksCrud(
   // POST /api/tasks — create
   if (req.method === 'POST' && pathname === '/api/tasks') {
     const body = parseJson(await parseBody(req)) as any;
-    if (
-      !body.group_folder ||
-      !body.prompt ||
-      !body.schedule_type ||
-      !body.schedule_value
-    ) {
+    if (!body.prompt || !body.schedule_type || !body.schedule_value) {
       return error(res, 'Missing required fields');
     }
     const VALID_SCHEDULE_TYPES = ['cron', 'interval', 'once'] as const;
@@ -2009,7 +2004,6 @@ async function handleTasksCrud(
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     createTask({
       id: taskId,
-      group_folder: body.group_folder,
       chat_jid: body.chat_jid || 'web:dashboard',
       prompt: body.prompt,
       schedule_type: scheduleType,

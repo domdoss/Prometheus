@@ -1,17 +1,17 @@
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
-import { SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE, TRIGGER_PATTERN } from './config.js';
 import {
   deleteTask,
   getDueTasks,
   getTaskById,
   logTaskRun,
   pruneTaskRunLogs,
-  updateTask,
+  storeMessage,
   updateTaskAfterRun,
 } from './db.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import { resolveGroupFolderPath, type RegisteredGroup } from './group-folder.js';
 import { logger } from './logger.js';
 import { ScheduledTask } from './types.js';
 
@@ -76,22 +76,19 @@ export function computeNextRun(task: ScheduledTask): string | null {
 }
 
 /**
- * Minimal scheduler queue interface. GroupQueue is gone; the scheduler only
- * needs a way to serialize tasks per-chat so a single chat doesn't run two
- * tasks concurrently.
+ * Minimal scheduler queue interface. The scheduler no longer runs agents — it
+ * only injects the task prompt into the chat as a regular message and pokes the
+ * normal message queue. enqueueMessageCheck asks the host to run a message-pickup
+ * pass for a chat so the injected prompt is processed immediately rather than
+ * waiting for the next poll tick.
  */
 export interface SchedulerQueue {
-  enqueueTask(jid: string, id: string, fn: () => Promise<void>): void;
+  enqueueMessageCheck(jid: string): void;
 }
 
 export interface SchedulerDependencies {
+  registeredGroups: () => Record<string, RegisteredGroup>;
   queue: SchedulerQueue;
-  /**
-   * Deliver a fired task's prompt into the chat as an inbound message. The
-   * running conversation picks it up on the next message-loop tick and handles
-   * it with full chat context — the scheduler never spawns its own agent.
-   */
-  injectMessage: (chatJid: string, text: string) => void;
 }
 
 async function runTask(
@@ -99,82 +96,76 @@ async function runTask(
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
-  // Single-user schema dropped the group_folder column, so tasks read from the
-  // DB carry undefined here — every task is the owner's. Default it or every
-  // scheduled task errors out ("Invalid group folder") at fire time.
-  if (!task.group_folder) task.group_folder = 'owner';
-  let groupDir: string;
-  try {
-    groupDir = resolveGroupFolderPath(task.group_folder);
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    // Stop retry churn for malformed legacy rows.
-    updateTask(task.id, { status: 'paused' });
-    logger.error(
-      { taskId: task.id, groupFolder: task.group_folder, error },
-      'Task has invalid group folder',
-    );
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'error',
-      result: null,
-      error,
-    });
-    return;
-  }
-  fs.mkdirSync(groupDir, { recursive: true });
+  logger.info({ taskId: task.id }, 'Injecting scheduled task prompt into chat');
 
-  // For heartbeat tasks, inject HEARTBEAT.md contents directly into the prompt
-  // so the agent gets the instructions immediately without a file-read tool call.
+  // Heartbeat tasks bake the group's HEARTBEAT.md instructions into the prompt
+  // so the agent acts on them immediately — no file-read tool call needed.
   let prompt = task.prompt;
   if (task.id.startsWith('heartbeat-')) {
-    const heartbeatPath = `${groupDir}/HEARTBEAT.md`;
     try {
-      const content = fs.readFileSync(heartbeatPath, 'utf-8').trim();
-      if (content) {
-        prompt = `[HEARTBEAT] Execute the following instructions:\n\n---\n${content}\n---\n\nBe efficient and concise.`;
+      const dir = resolveGroupFolderPath(task.group_folder || 'owner');
+      const heartbeat = fs.readFileSync(`${dir}/HEARTBEAT.md`, 'utf-8').trim();
+      if (heartbeat) {
+        prompt = `[HEARTBEAT] Execute the following instructions:\n\n---\n${heartbeat}\n---\n\nBe efficient and concise.`;
       }
     } catch {
-      // File missing — keep original prompt as fallback
+      // No HEARTBEAT.md — use the prompt as-is.
     }
   }
 
-  logger.info(
-    { taskId: task.id, group: task.group_folder },
-    'Scheduled task fired — injecting prompt into chat',
+  // A schedule is just a prompt on a crontab. Inject it into the chat as a
+  // regular message attributed to Automation; the normal message pipeline picks
+  // it up, so the orchestrator and the user both see it — indistinguishable
+  // from the user typing the prompt. Prefix the trigger word only when the
+  // group requires one. The model is whatever the orchestrator is already
+  // configured to use — tasks don't carry their own.
+  const group = Object.values(deps.registeredGroups()).find(
+    (g) => g.folder === (task.group_folder || 'owner'),
   );
+  const content =
+    group?.requiresTrigger && !TRIGGER_PATTERN.test(prompt)
+      ? `@${ASSISTANT_NAME} ${prompt}`
+      : prompt;
 
-  // Firing a task is just delivering its prompt to the running chat: the
-  // message loop treats it like any inbound message, so the orchestrator
-  // handles it with full conversation context and its normal tools.
-  let error: string | null = null;
+  // is_from_me:true marks it owner-side; is_bot_message:false (the default) so
+  // the message loop's pending query — which filters is_bot_message = 0 — picks
+  // it up. The agent's reply then lands in the chat like any other response.
   try {
-    deps.injectMessage(task.chat_jid, prompt);
+    storeMessage({
+      id: `automation-${task.id}-${Date.now()}`,
+      chat_jid: task.chat_jid,
+      sender: 'automation',
+      sender_name: 'Automation',
+      content,
+      timestamp: new Date().toISOString(),
+      is_from_me: true,
+      is_bot_message: false,
+    });
   } catch (err) {
-    error = err instanceof Error ? err.message : String(err);
-    logger.error({ taskId: task.id, error }, 'Task prompt injection failed');
+    logger.warn({ taskId: task.id, err }, 'Failed to store Automation chat message');
   }
+
+  // Poke the normal message queue so the injected prompt is processed now
+  // rather than on the next poll tick.
+  deps.queue.enqueueMessageCheck(task.chat_jid);
 
   logTaskRun({
     task_id: task.id,
     run_at: new Date().toISOString(),
     duration_ms: Date.now() - startTime,
-    status: error ? 'error' : 'success',
-    result: error ? null : 'Prompt injected into chat',
-    error,
+    status: 'success',
+    result: 'Prompt injected into chat',
+    error: null,
   });
 
   const nextRun = computeNextRun(task);
-  const resultSummary = error ? `Error: ${error}` : 'Injected into chat';
 
-  // One-time tasks are automatically deleted after completion
+  // One-time tasks auto-delete after firing; recurring tasks get next_run recomputed.
   if (task.schedule_type === 'once') {
     deleteTask(task.id);
-    logger.info({ taskId: task.id }, 'One-time task auto-deleted after completion');
+    logger.info({ taskId: task.id }, 'One-time task auto-deleted after firing');
   } else {
-    updateTaskAfterRun(task.id, nextRun, resultSummary);
+    updateTaskAfterRun(task.id, nextRun, 'Prompt injected into chat');
   }
 }
 
@@ -203,9 +194,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
-          runTask(currentTask, deps),
-        );
+        void runTask(currentTask, deps);
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

@@ -74,7 +74,8 @@ export interface NewMessage {
 
 export interface ScheduledTask {
   id: string;
-  group_folder: string;
+  /** Legacy multi-group column, dropped in the single-user schema. Kept optional for rows/objects that still carry it. */
+  group_folder?: string;
   chat_jid: string;
   prompt: string;
   schedule_type: 'cron' | 'interval' | 'once';
@@ -85,8 +86,6 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused' | 'completed';
   created_at: string;
-  model?: string | null;
-  user_id?: string | null;
 }
 
 export interface TaskRunLog {

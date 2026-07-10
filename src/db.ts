@@ -54,8 +54,6 @@ function createSchema(database: Database.Database): void {
       schedule_type TEXT NOT NULL,
       schedule_value TEXT NOT NULL,
       context_mode TEXT DEFAULT 'isolated',
-      model TEXT,
-      user_id TEXT,
       next_run TEXT,
       last_run TEXT,
       last_result TEXT,
@@ -731,8 +729,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at, model, user_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -744,8 +742,6 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
-    task.model ?? null,
-    task.user_id ?? null,
   );
 }
 
@@ -771,8 +767,6 @@ export function updateTask(
       | 'schedule_value'
       | 'next_run'
       | 'status'
-      | 'model'
-      | 'user_id'
     >
   >,
 ): void {
@@ -798,14 +792,6 @@ export function updateTask(
   if (updates.status !== undefined) {
     fields.push('status = ?');
     values.push(updates.status);
-  }
-  if (updates.model !== undefined) {
-    fields.push('model = ?');
-    values.push(updates.model);
-  }
-  if (updates.user_id !== undefined) {
-    fields.push('user_id = ?');
-    values.push(updates.user_id);
   }
 
   if (fields.length === 0) return;

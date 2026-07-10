@@ -35,9 +35,9 @@ export const TOOLSETS: Record<string, ToolsetDef> = {
     agent:     { name: 'agent',     tools: ['byte','dexter','atlas','artemis','iris'], tier: 'public' },
 
     'byte-core':     { name: 'byte-core',     includes: ['projects','worktasks','deliverables','blockers','tracking','admin'] },
-    'dexter-core':   { name: 'dexter-core',   includes: ['web'] },
+    'dexter-core':   { name: 'dexter-core',   includes: ['tasks'] },
     'atlas-core':    { name: 'atlas-core',    includes: ['web','browser','terminal','documents','admin'] },
-    'artemis-core':  { name: 'artemis-core',  tools: ['Read','Grep','Glob','get_chat_history'] },
+    'artemis-core':  { name: 'artemis-core',  tools: ['Read','Grep','Glob','Bash','get_chat_history'] },
     'iris-core':     { name: 'iris-core',     includes: ['email','contacts','calendar','todos'] },
     'file-core':     { name: 'file-core',     includes: ['file','chat'] },
 };
