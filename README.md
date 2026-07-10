@@ -45,7 +45,7 @@ Warden is a personal AI assistant that lives on your desktop. It runs local mode
 
 ### The Orchestrator
 
-A single LLM — the **orchestrator** — runs the show. It receives your message, decides what needs to happen, and delegates work to a team of specialized sub-agents. The orchestrator itself is designed to be a small, fast model (local Ollama) that routes and supervises rather than executing directly.
+A single LLM — the **orchestrator** — runs the show. It's the only thing you talk to, and it's deliberately *small*: a 12B Gemma 4 model (`gemma4:latest`) running locally on Ollama. It doesn't write your reports, doesn't browse the web, doesn't run shell commands. It reads your message, works out what you actually want, hands a clean brief to the right specialist, and then **babysits** that specialist until the job is done — cutting loose the ones that go sideways and re-briefing the ones that fail. A 12B model supervising a frontier model, and it doesn't fuck up.
 
 ```
 You → Orchestrator (small, local) → Atlas (large, cloud) → result → Orchestrator → You
@@ -57,6 +57,32 @@ You → Orchestrator (small, local) → Atlas (large, cloud) → result → Orch
 ```
 
 > 💡 **The orchestrator never touches the internet directly.** It doesn't browse, search, or fetch URLs. It delegates. That separation lets the orchestrator stay small and local while the internet-connected agents run on the biggest models available.
+
+#### A 12B model is enough — that's the whole point
+
+This is the counterintuitive part: the orchestrator is the cheapest model in the stack, and that's by design. Its job isn't generation, it's **classification and composition**. Every turn it answers a small set of questions: *what does the user want, which specialist owns it, what does that specialist need to know to start cold, and is anything I'm currently babysitting going sideways?* None of that needs a frontier model. A 12B Gemma 4 nails it — locally, in well under a second per turn, on hardware you already own — so the thing you talk to most carries no per-turn cloud cost.
+
+The expensive generation lives one layer down, in the specialists. Atlas and Artemis default to a large cloud model (`deepseek-v4-pro:cloud`); the three Council seats each run their own model. The orchestrator stays out of that. It states **what** needs to happen and stops — it never prescribes **how** (no URLs, no search queries, no "go to X then click Y"), because it can't even see the specialists' tools. That discipline is exactly what lets a 12B model supervise a frontier one without getting in the way: it can't micromanage what it can't see, so it doesn't try.
+
+#### Babysitting the sub-agents
+
+Delegation is not fire-and-forget. When the orchestrator hands work to Atlas, Atlas runs **in the background** — the orchestrator gets a job ID back immediately and stays free to handle your next message. While those jobs run, the orchestrator supervises them on a fixed **45-second monitor tick**. On every tick it receives a synthetic status line for each running job — elapsed time, tool-call count, what the job last did and how many seconds ago — and makes one of three calls:
+
+- **Progressing** → leave it alone and wait for the next tick.
+- **Stuck, looping, or doing the wrong thing** → call `stop_agent` with the job's ID and tell you, in one sentence, what it stopped and why.
+- **Finished** → the result lands in an **inbox**.
+
+The inbox is the backbone of the async model. Finished jobs drop their full output there, and at the end of each turn the orchestrator drains it, digests what actually matters in its own voice, and chains any follow-up work the results call for. If a job **failed**, the failure routes back to the orchestrator automatically — it reads the full output, works out what went wrong, and re-delegates with a reworked brief (a different approach, a corrected URL, a missing detail — whatever the output showed was broken). You only hear about a failure if it can't be recovered; after the same task has failed the same way twice, the orchestrator stops retrying and tells you instead. Urgent results can even **interrupt a turn mid-flight**, so a finished job you're waiting on never sits behind whatever else happens to be running.
+
+The net effect: you ask once, and the orchestrator owns the outcome — prompting the specialists, supervising them, cutting off the ones that drift, and correcting course until the job is done or it's genuinely stuck.
+
+#### One conversation, one voice
+
+You have one conversation, with one assistant. Atlas, Iris, Dexter, and the rest never see your messages and never speak to you — the orchestrator is the only voice in the chat. It works out what you actually need, composes a self-contained brief for the right specialist, and reports back in its own words when the work is done.
+
+![The orchestrator rewrites casual requests into clean task briefs before delegating](docs/screenshots/fabric.webp)
+
+Your raw message never reaches a specialist. *"hey can you set the volume to like fifty percent"* goes in; *"Set the system volume to 50 percent"* is what gets delegated. Every request is rewritten into a precise, self-contained brief — typos, slang, and missing context resolved — so the executing model starts from a clean statement of the goal instead of guessing at your phrasing.
 
 ### Sub-Agents
 
@@ -76,26 +102,6 @@ Each sub-agent has its own system prompt, its own toolset, and its own model. Th
 ### ⏰ Scheduling
 
 There is no scheduling agent. A schedule is two things: a **crontab expression** (or a one-shot timestamp, or an interval) and a **text prompt**. The orchestrator creates them directly with its own `schedule_task` tool, and the dashboard edits them in the Scheduled Tasks panel. At fire time the prompt is injected into the running chat as a message from "Scheduler" — the orchestrator handles it like any other message, with full conversation context and all its tools. No separate agent run, no separate session.
-
-### Async by Default
-
-> ⚡ **Atlas runs in the background.** When the orchestrator delegates to Atlas, it gets a job ID back immediately and stays free to handle your next message. Results land in an **inbox** — the orchestrator drains it at turn end, digests what matters, and chains follow-up tasks. Urgent jobs can interrupt mid-turn.
-
-### 🕹️ You Never Talk to Atlas
-
-You have one conversation, with one assistant. Atlas, Iris, Dexter, and the rest never see your messages and never speak to you — the orchestrator is the only voice in the chat. It works out what you actually need, composes a self-contained brief for the right specialist, and reports back in its own words when the work is done.
-
-![The orchestrator rewrites casual requests into clean task briefs before delegating](docs/screenshots/fabric.webp)
-
-Your raw message never reaches a specialist. "hey can you set the volume to like fifty percent" goes in; *"Set the system volume to 50 percent"* is what gets delegated. Every request is rewritten into a precise, self-contained brief — typos, slang, and missing context resolved — so the executing model starts from a clean statement of the goal instead of guessing at your phrasing.
-
-And delegation isn't fire-and-forget. While Atlas jobs run, the orchestrator checks in on every one of them at a fixed interval — elapsed time, tool-call count, what the job last did and how long ago — and makes a call:
-
-- **Progressing** → leave it alone.
-- **Stuck or looping** → stop it.
-- **Failed** → the failure routes back to the orchestrator automatically; it reads the full output, works out what went wrong, and re-delegates with a reworked brief. You only hear about a failure if it can't be recovered.
-
-You ask once; the orchestrator owns the outcome — prompting the specialists, supervising them, cutting off the ones that go sideways, and correcting course until the job is done.
 
 ### Persistent Runner
 
