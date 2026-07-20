@@ -7,7 +7,14 @@ export const TOOLSETS: Record<string, ToolsetDef> = {
                                              'browser_press_key', 'browser_select_option', 'browser_hover',
                                              'browser_screenshot', 'browser_evaluate', 'browser_wait_for',
                                              'browser_tabs', 'browser_back', 'browser_current_url'], tier: 'public' },
-    terminal:  { name: 'terminal',  tools: ['Bash', 'desktop_screenshot', 'desktop_click', 'desktop_type'], tier: 'public' },
+    terminal:  { name: 'terminal',  tools: ['Bash', 'desktop_click', 'desktop_type'], tier: 'public' },
+    // Vision captures (screenshot / webcam / host image files) are ORCHESTRATOR-ONLY:
+    // the image is injected into the caller's vision context via _pendingImages,
+    // which only runNativeOllama (the orchestrator loop) consumes. Sub-agents like
+    // Atlas run runSubAgent, which never reads _pendingImages — so they cannot see
+    // captured frames. Keep these out of every sub-agent toolset (atlas-core pulls
+    // in `terminal` above, NOT `capture`) so the orchestrator handles all vision.
+    capture:   { name: 'capture',   tools: ['desktop_screenshot', 'webcam_capture', 'read_image'], tier: 'public' },
     projects:  { name: 'projects',  tools: ['create_project','get_project','update_project','archive_project',
                                              'complete_project','delete_project','list_projects'], tier: 'public' },
     worktasks: { name: 'worktasks', tools: ['create_work_task','list_work_tasks','update_work_task',
@@ -27,12 +34,19 @@ export const TOOLSETS: Record<string, ToolsetDef> = {
     todos:     { name: 'todos',     tools: ['list_todos','create_todo','complete_todo','delete_todo'], tier: 'private' },
     alarms:    { name: 'alarms',    tools: ['create_alarm','list_alarms','update_alarm','delete_alarm'], tier: 'private' },
     sms:       { name: 'sms',       tools: ['send_sms','read_sms'], tier: 'private' },
-    chat:      { name: 'chat',      tools: ['get_chat_history','ping_user','attach_file','set_user_email'], tier: 'both' },
+    chat:      { name: 'chat',      tools: ['get_chat_history','ping_user','attach_file','set_user_email','tell_heimdall'], tier: 'both' },
     admin:     { name: 'admin',     tools: ['register_group','list_api_keys','api_request'], tier: 'public' },
     documents: { name: 'documents', tools: ['generate_pdf','convert_file'], tier: 'public' },
     context:   { name: 'context',   tools: ['clear_context'], tier: 'public' },
     fabric:    { name: 'fabric',    tools: ['fabric_pattern'], tier: 'both' },
     agent:     { name: 'agent',     tools: ['byte','dexter','atlas','artemis','iris'], tier: 'public' },
+
+    // Heimdall — the background security agent. All its security tools listed
+    // explicitly here so the sub-agent definitely gets them (close_security_alert
+    // is registered with toolset 'chat' but isn't in the chat toolset's list).
+    // Read/Write/Edit come via 'file' (tier both → BOTH_TOOL_DEFS).
+    security:     { name: 'security',     tools: ['webcam_capture','send_message','alert_security','open_security_alert','dismiss_security_flag','save_known_person','security_log'], tier: 'public' },
+    'security-core': { name: 'security-core', includes: ['security'] },
 
     'byte-core':     { name: 'byte-core',     includes: ['projects','worktasks','deliverables','blockers','tracking','admin'] },
     'dexter-core':   { name: 'dexter-core',   includes: ['tasks'] },

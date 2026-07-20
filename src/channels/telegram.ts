@@ -24,7 +24,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { Bot, GrammyError, HttpError } from 'grammy';
+import { Bot, GrammyError, HttpError, InputFile } from 'grammy';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { Channel, NewMessage, OnInboundMessage } from '../types.js';
 import { readEnvFile } from '../env.js';
@@ -295,6 +295,50 @@ export class TelegramChannel implements Channel {
     const chatId = this.ownsJid(jid) ? jid.slice(JID_PREFIX.length) : this.ownerChatId;
     if (!chatId) return;
     this.stopTyping(); // a reply is going out — thinking is over
+
+    // [Image: <path>] refs → send as Telegram photos (with the surrounding
+    // text as the caption) so alert frames show up on the phone. Path is
+    // repo-relative; resolve from the Warden cwd.
+    const imgRe = /\[Image:\s*([^\]]+)\]/gi;
+    const images: string[] = [];
+    let mm: RegExpExecArray | null;
+    while ((mm = imgRe.exec(text)) !== null) images.push(mm[1].trim());
+    const caption = text.replace(imgRe, '').trim();
+
+    if (images.length > 0) {
+      for (const rel of images) {
+        const abs = path.isAbsolute(rel) ? rel : path.resolve(process.cwd(), rel);
+        if (!fs.existsSync(abs)) { warn(`sendPhoto: image not found: ${abs}`); continue; }
+        let attempt = 0;
+        for (;;) {
+          try {
+            await this.bot.api.sendPhoto(Number(chatId), new InputFile(abs), {
+              caption: caption.slice(0, 1024) || undefined,
+            });
+            break;
+          } catch (err: any) {
+            const retryAfter = err instanceof GrammyError ? err.parameters?.retry_after : undefined;
+            if (retryAfter && attempt < 3) {
+              attempt++;
+              await new Promise((r) => setTimeout(r, (retryAfter + 1) * 1000));
+              continue;
+            }
+            if (attempt < 1) { attempt++; await new Promise((r) => setTimeout(r, 1500)); continue; }
+            warn(`sendPhoto failed permanently: ${err?.message ?? err}`);
+            break;
+          }
+        }
+      }
+      // Any caption text beyond Telegram's 1024-char limit → follow-up text.
+      if (caption.length > 1024) {
+        for (const chunk of chunkText(caption.slice(1024))) {
+          try { await this.bot.api.sendMessage(Number(chatId), chunk, { link_preview_options: { is_disabled: true } }); }
+          catch (err: any) { warn(`caption follow-up failed: ${err?.message ?? err}`); }
+        }
+      }
+      return;
+    }
+
     const chunks = chunkText(text);
     for (const chunk of chunks) {
       let attempt = 0;

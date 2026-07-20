@@ -68,13 +68,11 @@ The expensive generation lives one layer down, in the specialists. Atlas and Art
 
 #### Babysitting the sub-agents
 
-Delegation is not fire-and-forget. When the orchestrator hands work to Atlas, Atlas runs **in the background** — the orchestrator gets a job ID back immediately and stays free to handle your next message. While those jobs run, the orchestrator supervises them on a fixed **45-second monitor tick**. On every tick it receives a synthetic status line for each running job — elapsed time, tool-call count, what the job last did and how many seconds ago — and makes one of three calls:
+Delegation is not fire-and-forget. When the orchestrator hands work to Atlas, Atlas runs **in the background** — the orchestrator gets a job ID back immediately and stays free to handle your next message. While those jobs run, the orchestrator supervises them on a fixed **30-second monitor tick**. On every tick it checks up on each running job — reads the synthetic status line (elapsed time, tool-call count, what the job last did and how many seconds ago) and decides whether the work is **on track**, **veering off / doing the wrong thing**, or **stuck and looping**. On track, it leaves the job alone; veering or stuck, it calls `stop_agent` and re-delegates with a corrected brief. When a job **finishes**, the result lands in an **inbox**.
 
-- **Progressing** → leave it alone and wait for the next tick.
-- **Stuck, looping, or doing the wrong thing** → call `stop_agent` with the job's ID and tell you, in one sentence, what it stopped and why.
-- **Finished** → the result lands in an **inbox**.
+Crucially, that supervision runs **silently**. The tick's prose ("Atlas is on track…") is canned filler — it doesn't go to your chat. Progress lives in the dashboard instead: the real status line each job emits on every tool call streams into a **grouped, collapsible Live Activity panel** (one summary line when collapsed, the recent history when expanded), so you watch what's actually happening without a parade of chat bubbles. The chat only carries **completed-task reports** (and interventions) — you ask once, the orchestrator drives the whole chain end to end, and you hear from it when there's something finished to tell you.
 
-The inbox is the backbone of the async model. Finished jobs drop their full output there, and at the end of each turn the orchestrator drains it, digests what actually matters in its own voice, and chains any follow-up work the results call for. If a job **failed**, the failure routes back to the orchestrator automatically — it reads the full output, works out what went wrong, and re-delegates with a reworked brief (a different approach, a corrected URL, a missing detail — whatever the output showed was broken). You only hear about a failure if it can't be recovered; after the same task has failed the same way twice, the orchestrator stops retrying and tells you instead. Urgent results can even **interrupt a turn mid-flight**, so a finished job you're waiting on never sits behind whatever else happens to be running.
+The inbox is the backbone of the async model. Finished jobs drop their full output there, and at the end of each turn the orchestrator drains it, digests what actually matters in its own voice, and chains any follow-up work the results call for — so a multi-step ask (plan → council → revise) runs end to end without you having to say "and?" or "continue" between steps. If a job **failed**, the failure routes back to the orchestrator automatically — it reads the full output, works out what went wrong, and re-delegates with a reworked brief (a different approach, a corrected URL, a missing detail — whatever the output showed was broken). You only hear about a failure if it can't be recovered; after the same task has failed the same way twice, the orchestrator stops retrying and tells you instead. Urgent results can even **interrupt a turn mid-flight**, so a finished job you're waiting on never sits behind whatever else happens to be running.
 
 The net effect: you ask once, and the orchestrator owns the outcome — prompting the specialists, supervising them, cutting off the ones that drift, and correcting course until the job is done or it's genuinely stuck.
 
@@ -251,7 +249,7 @@ A full PWA at `http://localhost:3200`. It includes:
 | ⚡ **Actions** | One-touch prompt buttons | 📱 **SMS** | Twilio send/receive |
 | 🎤 **Talk** | Voice transcription | ✉️ **Email** | IMAP inbox + send |
 | 📅 **Calendar** | CalDAV synced with Kontact | 🔗 **Accounts** | Connected channels + OAuth |
-| 🧩 **Skills & MCP** | Hot-pluggable capabilities | 📈 **Agent Activity** | Live verbose status |
+| 🧩 **Skills & MCP** | Hot-pluggable capabilities | 📈 **Agent Activity** | Live verbose status + collapsible progress panel |
 | 📜 **Process Logs** | Live log tail ||
 
 ### ⚡ Quick Actions
@@ -366,6 +364,23 @@ open http://localhost:3200
 ![Hologram voice assistant interface](docs/screenshots/voice.png)
 
 See `voice/README.md` for install and usage. Copy `voice/config/settings.example.yaml` to `voice/config/settings.yaml` (or run `python setup.py`) — `settings.yaml` holds your local server URL, user id, and an optional Cloudflare token, so it's gitignored and never committed.
+
+---
+
+## 🛡️ Security Mode
+
+`security/` is a standalone webcam watcher that flags detections to **Heimdall**, a background security agent, which reviews each flag and decides whether to raise an alert. It's a **basic framework** — plumbed into Warden and upgradable for real home-security use.
+
+- 📷 **RF-DETR Keypoint** (Apache 2.0, commercially free — no YOLO) watches the webcam on CPU.
+- 🧠 **Heimdall** (a background sub-agent) reviews each flagged frame with vision: **normal** → it saves the person's keyframe + dismisses silently; **abnormal** → it escalates (`alert_security`), messages you with the **image attached** (shows in chat + Telegram), and opens a red **STAND DOWN** button + a popup of the alert frame.
+- 🚫 **The alert is spawned only after Heimdall declares it abnormal** — the detector just flags for review. Heimdall **cannot close alerts** — only the guard at the keyboard can (STAND DOWN button, or "close the alert" in chat).
+- 👤 **Known people are skipped at the detector** (pHash keyframe compare) — no agent round-trip, no spam.
+- 🗄️ `store/security.db` logs every flag + assessment (engrained) and stores known-person keyframes.
+- 🔌 The orchestrator talks to Heimdall **directly** (`tell_heimdall`) — never via Atlas.
+
+It's intentionally a starting framework. Upgradable later as plugins/MCP: **Home Assistant** (arm/disarm, sensors), a **real guard-dispatch service** (swap the `alert_security` mock for a real call), **InsightFace face-ID** (reliable recognition across positions), and more cameras/RTSP.
+
+See `security/README.md` for install, start/stop, and the full flow.
 
 ---
 

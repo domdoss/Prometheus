@@ -1,0 +1,156 @@
+# Security Mode — the "set of instructions" the light model enforces.
+#
+# Copy this file to settings.yaml and edit, or pass --config <path>.
+# When a rule matches, the flagged frame + an event JSON are written to
+# output.events_dir. (The Warden IPC handoff reads these later — not wired yet.)
+
+camera:
+  # Local webcam (OpenCV index). 0 = default. Use `v4l2-ctl --list-devices`
+  # or pass --camera to override without editing this.
+  index: 0
+  # Downscale before inference. RF-DETR Keypoint runs at 576x576 internally,
+  # so anything larger just costs capture bandwidth. Set to the webcam's
+  # native width if you want full-res frames saved.
+  width: 640
+  height: 480
+  # Frames per second to actually process. The webcam captures as fast as it
+  # can; we sample at this rate. CPU inference is slow — 2-4 fps is realistic.
+  fps: 3
+
+model:
+  # "keypoint" = RF-DETR Keypoint Preview (Apache 2.0). Its detection head
+  # correctly finds person on CPU; only the pose head partially loads (we
+  # don't need pose for "detect person"). Plain detection (small) misclassifies
+  # a person as bicycle on this CPU, so keypoint is the reliable choice here.
+  # On a GPU with matched driver, keypoint is also fast.
+  variant: keypoint
+  # Detection checkpoint size for the "detection" variant (nano|small|medium|
+  # large). Ignored for keypoint (xlarge only).
+  size: small
+  # Detection confidence floor. Keypoint's per-detection score is modest on
+  # CPU; keep this low so the box stays steady (cooldown filters the alerts).
+  threshold: 0.2
+
+# Motion detection. Frame differencing produces a motion mask; its nonzero
+# area (in pixels) is the motion signal. This is what distinguishes "person
+# present" from "person moving" — required by any rule with require_movement.
+motion:
+  # Grayscale frames are differenced, blurred, then thresholded.
+  blur: 21
+  # Pixel-difference threshold (0-255). Higher = less sensitive.
+  pixel_threshold: 25
+  # Minimum nonzero area in the motion mask to count as "movement".
+  min_area: 800
+  # Discard motion mask area inside any detected person box? When true, motion
+  # is measured on the whole frame (people + background). When false we still
+  # use the whole frame — this is a hook for later refinement.
+  exclude_person_regions: false
+
+# The rules. A rule fires when ALL of its conditions are met on a frame:
+#   - at least `min_count` detections of one of `classes` at >= `min_confidence`
+#   - if `require_movement`: motion_area >= motion.min_area
+# Each rule has its own cooldown so a persistent person doesn't spam events.
+rules:
+  - name: "person moving"
+    classes: ["person"]
+    min_confidence: 0.2
+    min_count: 1
+    require_movement: true
+    cooldown_seconds: 30
+
+  - name: "person present"
+    classes: ["person"]
+    min_confidence: 0.2
+    min_count: 1
+    require_movement: false
+    cooldown_seconds: 120
+
+# Alert state machine. The detector raises ONE alert when it first sees an
+# allowed class, then HOLDS the alert open (no repeats) until Warden closes it
+# (via the close_security_alert tool → POST /alert/close). If Warden never
+# closes it, auto-rearm after this many seconds so it can alert again. 0 = never
+# auto-rearm (only Warden closes).
+alert:
+  # Only these classes are alert-worthy; every other detection is ignored.
+  # RF-DETR is COCO-trained (no "crowbar" class — closest thief-tool is knife).
+  # Note: the keypoint model is person-only, so only "person" will fire on CPU;
+  # the rest apply when a multi-class detection model is used.
+  allowed_classes:
+    - person
+    - car
+    - truck
+    - bus
+    - motorcycle
+    - bicycle
+    - knife
+    - scissors
+    - backpack
+    - suitcase
+    - handbag
+  # Auto-rearm fallback (seconds). The GUI slider overrides this live.
+  rearm_timeout: 300
+  # After a flag is dismissed/closed, wait this many seconds before flagging again
+  # (max ~1 flag per this many seconds). The "rearm sec" slider overrides live.
+  rearm_delay: 20
+  # Camera-tamper detection. If the frame is near-uniform (lens covered /
+  # blocked) for this many consecutive frames, raise a "camera covered" alert.
+  # covered_std = max grayscale std-dev that counts as "covered" (a real scene
+  # is well above ~10; a covered lens is near 0). A dark room can also look
+  # uniform, so keep covered_std low to avoid false tamper alerts at night.
+  covered_std: 6
+  covered_frames: 3
+
+  # Example: flag any vehicle.
+  # - name: "vehicle"
+  #   classes: ["car", "truck", "bus", "motorcycle"]
+  #   min_confidence: 0.5
+  #   min_count: 1
+  #   require_movement: true
+  #   cooldown_seconds: 60
+
+output:
+  # Where flagged frames + event JSON are written.
+  events_dir: ./data/events
+  # Save the annotated frame (boxes + keypoints drawn) alongside the raw frame?
+  save_annotated: true
+  # Also keep the raw, unannotated frame?
+  save_raw: false
+  # Max events to keep on disk (0 = unlimited). Oldest deleted first.
+  max_events: 1000
+
+# Warden integration (demo). When a rule fires, the security app writes the
+# frame here and POSTs a message to the Warden server so its vision agent can
+# look + decide. This path is relative to the security/ dir so it lands inside
+# the owner group's attachments (the agent's Read tool resolves it against the
+# Warden repo root). No Warden-side code changes needed — the message just
+# arrives like any dashboard message.
+warden:
+  base_url: http://127.0.0.1:3200
+  # Owner chat jid the Warden message loop polls.
+  owner_jid: owner@local
+  # Where alert frames are written (relative to security/). Default points at
+  # <repo>/groups/owner/attachments — the agent's Read tool finds them there.
+  attachments_dir: ../groups/owner/attachments
+
+# Frame server — lets Warden's webcam_capture tool pull the latest frame over
+# HTTP while this app owns /dev/video0 (so on-demand "look at the camera"
+# works during the demo instead of hitting "device busy"). Falls back to
+# ffmpeg on Warden's side when this server isn't running.
+frame_server:
+  host: 127.0.0.1
+  port: 8765
+
+# Voice client — the security launcher opens voice/ (Jarvis) alongside the
+# webcam window so Warden's alert replies get spoken by Kokoro, and so you can
+# talk to Warden ("look at the camera and describe what you see").
+voice:
+  enabled: true
+  # Path to the voice/ client dir (relative to security/).
+  dir: ../voice
+  # Run voice/single.py once to point the client at the local Warden if the
+  # config isn't already set up. single.py clears the session each run, so we
+  # only do it when no local config exists.
+  auto_setup: true
+
+logging:
+  level: INFO

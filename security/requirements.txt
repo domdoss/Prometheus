@@ -1,0 +1,11 @@
+# RF-DETR Keypoint (Apache 2.0) — the "light model" that watches the webcam.
+rfdetr>=0.1.0
+supervision>=0.21.0
+# Capture + image handling.
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+# Config + event output.
+pyyaml>=6.0
+# Keyframe recognition (known-person pHash compare, application-side).
+imagehash>=4.3.0

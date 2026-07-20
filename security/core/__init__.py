@@ -1,0 +1,1 @@
+"""Security Mode core — detection, motion, rules, capture."""

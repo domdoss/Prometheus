@@ -1,0 +1,8 @@
+# Python venv (large, machine-local)
+.venv/
+# Runtime artifacts
+data/
+__pycache__/
+*.pyc
+# Local settings (copy from settings.example.yaml)
+config/settings.yaml

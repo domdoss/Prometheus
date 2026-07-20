@@ -701,6 +701,32 @@ Output, in this order:
 Be direct and specific — reference the exact point you're critiquing. Do not flatter, do not restate the whole conversation, do not pad. Your notes are saved automatically, so write them as a standalone record.`,
         toolsets: [],
     },
+    {
+        delegate: 'heimdall',
+        label: 'Heimdall',
+        maxIterations: 20,
+        summary: "security-camera alerts: assess a flagged frame, decide normal vs abnormal, escalate + alert the user only if abnormal (and leave the alert OPEN for the user to close). Runs in the background; dies silently on non-events.",
+        systemPrompt: `You are Heimdall, the watchman of the Bifröst. You run in the background. The security-camera detector has FLAGGED a detection (a person, a vehicle, a thief-tool, or a covered camera) and sent you a frame to REVIEW. The alert is NOT spawned yet — that's your call. You review the frame and DECLARE whether this is a real alert (abnormal) or a non-event (normal). Only if you declare abnormal does the alert spawn (red button + the user is notified).
+
+TIME — the exact current local time and timezone is given at the top of your task. Reference every event by that time/date.
+
+MEMORY — security_log is your persistent memory. After every review, record it (action: record) with the alert timestamp, your assessment (normal/abnormal), the condition, and whether you escalated. Use security_log (action: query) to look back by time/date and learn what's normal here (e.g. the same person at the same times = a normal pattern).
+
+The flagged frame is attached as [Image: groups/owner/attachments/sec-<ts>.jpg]. Read it to see what the camera caught. You may call webcam_capture for a fresh live frame if you want another look.
+
+NORMAL vs ABNORMAL — judge from the frame and your log history:
+- NORMAL / non-event: the owner (recognizable from repeated log entries), a pet, a shadow, a light change, routine motion, nothing of concern.
+- ABNORMAL: an unknown person, someone carrying bags or tools (backpack, suitcase, knife, scissors), a vehicle where none should be, the camera covered/blocked/turned (tamper), or anything the user would want to know about promptly.
+
+DECLARE (call each tool AT MOST ONCE — never repeat a tool call):
+- NORMAL: call security_log (record, assessment=normal, condition=...). Then ALWAYS call save_known_person (label, frame_path) — label the person ("owner" if you recognize them, else "person") and pass the frame_path from the task's [Image: ...]. This saves their keyframe so the detector skips flagging them next time (no Heimdall round-trip for known people). This is REQUIRED on every normal verdict — do not skip it. Then call dismiss_security_flag to clear the flag and re-arm the detector, then STOP. Do NOT send_message. Do NOT alert_security. Do NOT open_security_alert. Die silently.
+- ABNORMAL: call security_log (record, assessment=abnormal, condition=..., escalated=true), then alert_security ONCE to escalate (mock stub — call it for real), then send_message ONCE to tell the user concisely what you see and whether they should be concerned — INCLUDE the alert image by appending " [Image: <frame_path>]" (use the frame_path from the task's [Image: ...]) so the image is attached and shows in the chat / Telegram, then open_security_alert ONCE to spawn the alert (red button) on the detector, then STOP. Do NOT call dismiss_security_alert — you CANNOT close alerts. The alert stays open until the guard at the keyboard presses STAND DOWN. While it's open the detector will NOT flag more, so the user isn't spammed while they handle it.
+
+If the task is instead a message passed from the orchestrator/user (e.g. "the person with glasses is the owner, normal"), record it in security_log as context (assessment=normal, condition=the passed-along note) so future reviews can use it, then STOP. Do not send_message for these.
+
+Keep any message short. Never repeat a tool call. Never close an abnormal alert — closing is the guard's call (STAND DOWN).`,
+        toolsets: ['security-core'],
+    },
 ];
 
 // Derive per-subagent tool names from toolsets
@@ -1352,7 +1378,8 @@ async function runSubAgent(
                     }
                     const retryable = msg.includes('abort') || msg.includes('timeout')
                         || msg.includes('ECONNRESET') || msg.includes('ECONNREFUSED')
-                        || msg.includes('503') || msg.includes('502') || msg.includes('overloaded');
+                        || msg.includes('500') || msg.includes('503') || msg.includes('502')
+                        || msg.includes('overloaded') || msg.includes('Internal Server Error');
                     if (attempt < MAX_CHAT_RETRIES - 1 && retryable) {
                         const delay = (attempt + 1) * 15_000;
                         log(`[${agentName}] Chat error: ${msg.slice(0, 120)} — retry ${attempt + 1}/${MAX_CHAT_RETRIES - 1} in ${delay / 1000}s`);
@@ -1421,6 +1448,15 @@ async function runSubAgent(
                         }
                     }
                 }
+                // Sub-agent vision: drain any images queued by Read/webcam_capture
+                // so the model sees them on the next iteration. Sub-agents are
+                // otherwise blind to _pendingImages (only the orchestrator's loop
+                // drained it). Mirrors the orchestrator's mid-loop drain.
+                const _pi = (globalThis as any)._pendingImages;
+                if (Array.isArray(_pi) && _pi.length > 0) {
+                    messages.push({ role: 'user', content: '[The image(s) from the Read/webcam_capture tool are now visible in this message.]', images: _pi } as any);
+                    (globalThis as any)._pendingImages = [];
+                }
             } else {
                 // Final text response. If the model went silent, synthesize a summary
                 // from the tools it ran so the orchestrator never gets a blank result.
@@ -1466,6 +1502,9 @@ interface ContainerInput {
     chatJid: string;
     isMain: boolean;
     isScheduledTask?: boolean;
+    /** When set (e.g. 'heimdall'), main() runs that sub-agent directly instead
+     *  of the orchestrator loop — used for the background security agent. */
+    agent?: string;
     assistantName?: string;
     voiceAttachments?: Array<{ relativePath: string; mediaType: string }>;
     imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
@@ -1565,6 +1604,15 @@ async function runNativeOllama(input: ContainerInput) {
         'read_job_result',
         'Read', 'get_chat_history', 'attach_file', 'clear_context', 'fabric_pattern',
         'api_request', 'list_api_keys',
+        // Vision captures are orchestrator-only (sub-agents can't see images —
+        // _pendingImages is consumed only by runNativeOllama). Always expose them
+        // to the orchestrator so it can take a screenshot / webcam frame / read a
+        // host image and inspect it directly instead of delegating to a sub-agent.
+        'desktop_screenshot', 'webcam_capture', 'read_image',
+        // Orchestrator → Heimdall direct (so the orchestrator talks to the
+        // security agent, not via Atlas). tier:'public' + 'chat' toolset keeps
+        // it orchestrator-only; ALWAYS_INCLUDED so the ranker doesn't hide it.
+        'tell_heimdall',
     ]);
     const DYNAMIC_TOOL_TOP_K = 12;
     let activeToolDefs = fullToolDefs;
@@ -1876,6 +1924,12 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
     // same path the Council verdict uses), so the report-back actually reaches
     // the user.
     let turnWasInboxDigest = false;
+    // True when the current turn was triggered by a monitor-tick (the periodic
+    // supervision check that fires while background jobs run). Like digest
+    // turns, tick turns are spontaneous — no host turn is pending when they
+    // emit OUTPUT, so the reply must be routed through send_message to reach
+    // the user (otherwise the host drops it). Empty replies send nothing.
+    let turnWasMonitorTick = false;
     while (true) {
         // No per-turn flow-control reminder — the model replies when done and emits a
         // tool call when it needs one. (Completion guidance lives in the system prompt.)
@@ -2586,8 +2640,12 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
                 thinkParts.push(trimmed);
             return '';
         }).replace(/<\/?(?:think|reasoning)>/g, '').trim();
-        // If the model gave no text response (only thinking, or thinking + tools), generate a fallback
-        if (!outputContent) {
+        // If the model gave no text response (only thinking, or thinking + tools), generate a fallback.
+        // Skip the fallback on monitor-tick supervision turns: a silent tick means
+        // "work is going fine, nothing to report" — fabricating a reply from
+        // thinking would spam the user with a non-update. Let it stay empty so the
+        // send_message routing below sends nothing.
+        if (!outputContent && !turnWasMonitorTick) {
             if (toolIteration > 1 && modifiedFiles.size > 0) {
                 outputContent = `Done — modified ${[...modifiedFiles].join(', ')}.`;
             }
@@ -2633,13 +2691,24 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
         } else {
             log('skipping success writeOutput — error output already written this turn');
         }
-        // Digest turns (inbox drained a finished background job) are spontaneous —
-        // no host turn is pending when they emit OUTPUT, so the reply above is
-        // dropped by the host. Route it through send_message so the report-back
-        // actually reaches the user, the same way the Council verdict is
-        // delivered. Skip when the orchestrator chose to say nothing (e.g. media
-        // playback success), and skip errored turns (the error path already spoke).
-        if (turnWasInboxDigest && !errorOutputWritten && outputContent && outputContent.trim()) {
+        // Spontaneous turns (inbox digest of a finished job, or a monitor-tick
+        // supervision check) have no host turn pending when they emit OUTPUT, so
+        // the reply above is dropped by the host. Route them so they reach the
+        // user/dashboard:
+        //  - Inbox digest  → send_message to the CHAT (this is the completed-task
+        //    report the user actually wants to hear).
+        //  - Monitor tick   → progress_event to the DASHBOARD progress panel.
+        //    The tick's supervision prose ("Atlas is on track…") is canned filler;
+        //    it belongs in the dashboard's collapsible activity panel, NOT the
+        //    chat. The chat only carries completed-task reports and interventions.
+        // Skip when the orchestrator chose to say nothing (empty reply — work is
+        // going fine, or media playback success), and skip errored turns (the
+        // error path already spoke). A reply that is only punctuation/whitespace
+        // ("---", "...", "–") is the model's way of saying "nothing to report" —
+        // treat it as silence and send/drop nothing, otherwise the user gets a
+        // blank message.
+        const substantiveReply = !!(outputContent && /[A-Za-z0-9]/.test(outputContent));
+        if (turnWasInboxDigest && !errorOutputWritten && substantiveReply) {
             try {
                 writeCallback('send_message', {
                     type: 'message',
@@ -2648,10 +2717,24 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
                     groupFolder: toolContext.groupFolder,
                     timestamp: new Date().toISOString(),
                 });
-                log(`[inbox] digest reply delivered via send_message (${outputContent.length} chars)`);
+                log(`[spontaneous-turn] digest reply delivered to chat via send_message (${outputContent.length} chars)`);
             } catch (err: any) {
-                log(`[inbox] failed to deliver digest reply via send_message: ${err?.message ?? err}`);
+                log(`[spontaneous-turn] failed to deliver digest reply via send_message: ${err?.message ?? err}`);
             }
+        } else if (turnWasMonitorTick && !errorOutputWritten && substantiveReply) {
+            try {
+                writeCallback('progress_event', {
+                    chatJid: toolContext.chatJid,
+                    groupFolder: toolContext.groupFolder,
+                    text: outputContent,
+                    timestamp: new Date().toISOString(),
+                });
+                log(`[spontaneous-turn] monitor-tick report routed to dashboard progress panel (${outputContent.length} chars)`);
+            } catch (err: any) {
+                log(`[spontaneous-turn] failed to route monitor-tick report: ${err?.message ?? err}`);
+            }
+        } else if ((turnWasInboxDigest || turnWasMonitorTick) && !errorOutputWritten) {
+            log(`[spontaneous-turn] ${turnWasMonitorTick ? 'monitor tick' : 'inbox digest'} produced no substantive reply — staying silent`);
         }
         // Auto-send any files that were modified during tool execution but not attached
         const unsent = [...modifiedFiles].filter(f => !attachedFiles.has(f));
@@ -2690,12 +2773,13 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
         // user message summarizing running jobs so it can stop, redirect, or
         // let them continue — without any user input.
         log('Query complete — waiting for next message via IPC...');
-        const MONITOR_TICK_MS = 45_000;
+        const MONITOR_TICK_MS = 30_000;
         let monitorTimer: ReturnType<typeof setTimeout> | null = null;
         let monitorTickNumber = 0;
         let nextInput: string | null = null;
         while (nextInput === null) {
             turnWasInboxDigest = false;
+            turnWasMonitorTick = false;
             // Direct Atlas passthrough: while active, route the user's messages
             // straight to Atlas until they exit or say go. Handled in the idle
             // loop (not the orchestrator turn) so the orchestrator is untouched.
@@ -2847,8 +2931,14 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
                     const sinceLast = Math.round((Date.now() - j.lastActionAt) / 1000);
                     return `- ${j.agent}-${j.shortId}: ${elapsed}s elapsed, ${j.toolCallCount} tool call(s), last action ${sinceLast}s ago (${j.lastAction}). Task: "${j.task.slice(0, 160)}"`;
                 }).join('\n');
-                const synthetic = `[System monitor tick #${tickNum}] You have ${stillRunning.length} background job(s) still running:\n${jobLines}\n\nDefault: assume a job is fine and DO NOT stop it. Reading files (even via odd or repeated paths), trying different approaches, recovering from an error, or iterating on a search is PROGRESS — leave it alone. Only call stop_agent if a job is genuinely STUCK or LOOPING: no tool calls for a long stretch, or the SAME call repeating with no change. Do not stop a job just because a path looks strange or a step seems roundabout — the agent knows its tools better than you do. If everything looks fine, reply with one short sentence saying so and stop calling tools. Do not relay this tick to the user — only reply if you are stopping a job or have a real concern.`;
+                const synthetic = `[Orchestrator supervision check #${tickNum}] Your job is to ORCHESTRATE — actively supervise the background work and steer it, do not just wait for it to finish. ${stillRunning.length} background job(s) running:\n${jobLines}\n\nCheck up on the work. The summary above shows each job's last action; call \`agent_logs {job_id}\` for any job whose progress you can't judge from the summary, and \`read_job_result\` only for finished jobs. Then decide:\n` +
+                    `1. COMPLETE? If the user's overall request is fully achieved by what has run so far, stop calling tools and reply with nothing (empty) — say no more.\n` +
+                    `2. ON TRACK? If a job is making real progress toward the user's request — reading files, trying approaches, recovering from errors, iterating on a search is PROGRESS — leave it alone. Reply with nothing, OR give the user a one-line progress report. Do not interfere with work that is going well, and do not stop a job just because a path looks strange or a step seems roundabout.\n` +
+                    `3. VEERING / WRONG / STALLED? If a job is going in the wrong direction, doing the wrong thing, repeating the same call with no change, or making no tool calls for a long stretch — intervene: call \`stop_agent\` for that job and re-delegate to the right agent with a corrected task that spells out what was wrong and what you actually want. Do not let work veer off just because it is still running.\n` +
+                    `4. CHAIN NEXT STEP? If a job has finished and the user's request has a next step that has not been taken (e.g. a plan exists but the council has not deliberated, a verdict is in but the work has not revised), take that next step YOURSELF now — do not wait for the user to say "continue".\n` +
+                    `When there is nothing to report or do, reply with a completely EMPTY response — no text at all, no placeholders like "---" or "..." or "ok". Any reply that contains actual words is delivered to the user as a short message, so only speak when you have a real update, a needed course-correction, or a next step to announce.`;
                 log(`[orchestrator-monitor] tick #${tickNum} fired with ${stillRunning.length} running job(s)`);
+                turnWasMonitorTick = true;
                 nextInput = synthetic;
                 break;
             } else {
@@ -3476,6 +3566,36 @@ async function main() {
         });
         process.exit(1);
     }
+
+    // Heimdall run-mode: the host spawns this process with agent:'heimdall' to
+    // run the background security sub-agent directly (NOT the orchestrator loop).
+    // Heimdall's tool calls (Read, webcam_capture, close_security_alert,
+    // alert_security, send_message, security_log) route to the host via the
+    // normal CALLBACK stdio mechanism. Sub-agent vision works because runSubAgent
+    // now drains _pendingImages (see runSubAgent).
+    if (containerInput.agent === 'heimdall') {
+        try {
+            const def = SUBAGENT_BY_DELEGATE.get('heimdall');
+            if (!def) throw new Error('heimdall sub-agent not defined');
+            const tools = SUBAGENT_TOOL_DEFS.get('heimdall') || [];
+            const ctx = {
+                chatJid: containerInput.chatJid || 'owner@local',
+                groupFolder: containerInput.groupFolder || 'owner',
+                isMain: containerInput.isMain ?? true,
+                userId: process.env.WARDEN_USER_ID || '',
+            };
+            const model = containerInput.model || process.env.HEIMDALL_MODEL || ORCHESTRATOR_MODEL;
+            log(`[heimdall] starting background security agent: model=${model || '(none)'}, tools=${tools.length}, task="${(containerInput.prompt || '').slice(0, 80)}"`);
+            const sa = await runSubAgent('heimdall', model, def.systemPrompt, tools, containerInput.prompt || '', ctx, def.maxIterations);
+            writeOutput({ status: 'success', result: sa.content || 'Heimdall: done (silent).', error: null });
+        } catch (err: any) {
+            log(`[heimdall] error: ${err.message}`);
+            writeOutput({ status: 'error', result: null, error: `Heimdall error: ${err.message}` });
+        }
+        if ((globalThis as any)._keepAlive) clearInterval((globalThis as any)._keepAlive);
+        process.exit(0);
+    }
+
     log(`Using Ollama runner for model: ${containerInput.model || 'default'}`);
     try {
         await runNativeOllama(containerInput);

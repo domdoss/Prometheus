@@ -21,7 +21,115 @@ export type AgentRunInput = AgentInput & {
   executable?: string;
   executableArgs?: string[];
   callbacks?: CallbackMap;
+  /** When set (e.g. 'heimdall'), runSubAgentBackground spawns the named sub-agent
+   *  directly instead of the orchestrator. */
+  agent?: string;
+  chatJid?: string;
+  groupFolder?: string;
+  isMain?: boolean;
 };
+
+/**
+ * Spawn a background sub-agent (e.g. Heimdall, the security agent) in a FRESH
+ * child process with its OWN self-contained CALLBACK pump — it does NOT touch
+ * the global `agentState`/persistent orchestrator child, so it runs alongside
+ * the main loop without clashing. Fire-and-forget: the host does not await it;
+ * the child runs the sub-agent, its tool calls are handled by `input.callbacks`
+ * (send_message / close_security_alert / webcam_capture / security_log), and it
+ * exits when done. Heimdall's user-facing output goes via its own send_message
+ * callback; the raw "SECURITY ALERT" trigger is consumed here, not by the
+ * orchestrator, so the main chat isn't muddied.
+ */
+export function runSubAgentBackground(input: AgentRunInput): void {
+  const exe = input.executable ?? DEFAULT_EXECUTABLE;
+  const exeArgs = input.executableArgs ?? DEFAULT_EXECUTABLE_ARGS;
+  const env = { ...process.env, WORKSPACE_ROOT: input.workspaceRoot, AGENT_TIMEOUT: String(input.timeoutMs) };
+  const child = spawn(exe, exeArgs, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const callbacks = input.callbacks ?? {};
+  const agentName = input.agent || 'heimdall';
+
+  let stdoutBuf = '';
+  let insideCallback = false;
+  let callbackLines: string[] = [];
+
+  const writeResp = (payload: any) => {
+    try {
+      child.stdin.write('CALLBACK_RESPONSE_START\n');
+      child.stdin.write(JSON.stringify(payload) + '\n');
+      child.stdin.write('CALLBACK_RESPONSE_END\n');
+    } catch { /* child gone */ }
+  };
+
+  const handleCb = async (raw: string) => {
+    let parsed: any;
+    try { parsed = JSON.parse(raw); } catch { writeResp({ error: 'bad callback JSON' }); return; }
+    const tool = parsed.tool;
+    const handler = callbacks[tool];
+    if (!handler) { writeResp({ id: parsed.id, error: `no handler for tool: ${tool}` }); return; }
+    try {
+      const r = await handler(parsed.args);
+      writeResp({ id: parsed.id, ...(r || {}) });
+    } catch (err: any) {
+      writeResp({ id: parsed.id, ok: false, error: err?.message ?? String(err) });
+    }
+  };
+
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdoutBuf += chunk.toString();
+    const lines = stdoutBuf.split('\n');
+    stdoutBuf = lines.pop() ?? '';
+    for (const line of lines) {
+      if (insideCallback) {
+        if (line === 'CALLBACK_END') {
+          insideCallback = false;
+          void handleCb(callbackLines.join('\n'));
+          callbackLines = [];
+          continue;
+        }
+        callbackLines.push(line);
+        continue;
+      }
+      if (line === 'CALLBACK_START') { insideCallback = true; callbackLines = []; continue; }
+      // Live status from the background agent → surface in the dashboard's
+      // progress bar (shared with the orchestrator's, but labeled by phase).
+      if (line.startsWith('---WARDEN_STATUS---')) {
+        try {
+          const e = JSON.parse(line.slice('---WARDEN_STATUS---'.length).trim());
+          if (e.label && e.label !== lastProgressLabel) {
+            lastProgressLabel = e.label;
+            pushProgress({ ts: e.ts || Date.now(), kind: 'status', phase: e.phase || agentName, label: e.label, jobs: 0 });
+          }
+        } catch { /* malformed */ }
+        continue;
+      }
+      // OUTPUT_START/END and other stdout lines are ignored (fire-and-forget;
+      // the agent's user-facing output went out via send_message callbacks).
+    }
+  });
+  child.stderr.on('data', (c: Buffer) => {
+    const t = c.toString().trim();
+    if (t) logger.info(`bg-agent[${agentName}]: ${t.slice(0, 300)}`);
+  });
+  child.on('exit', (code, signal) => {
+    logger.info({ agent: agentName, code, signal }, `bg-agent[${agentName}]: exited`);
+  });
+  child.on('error', (err) => {
+    logger.warn({ err, agent: agentName }, `bg-agent[${agentName}]: spawn error`);
+  });
+
+  const payload = JSON.stringify({
+    agent: agentName,
+    prompt: input.prompt,
+    model: input.model,
+    workspaceRoot: input.workspaceRoot,
+    chatJid: input.chatJid || 'owner@local',
+    groupFolder: input.groupFolder || 'owner',
+    isMain: input.isMain ?? true,
+    timeoutMs: input.timeoutMs,
+  });
+  logger.info({ agent: agentName, payloadLen: payload.length }, `bg-agent[${agentName}]: spawning`);
+  try { child.stdin.write(payload); } catch (err) { logger.warn({ err }, `bg-agent[${agentName}]: stdin write failed`); }
+}
 
 /**
  * Default `exec_request` callback handler. The agent-runner's Bash tool emits
@@ -221,6 +329,49 @@ export const liveStatus = {
   ts: 0,
 };
 
+// Ring buffer of recent progress events for the dashboard's collapsible
+// "Live activity" panel. Each entry is one real status change (an atlas tool
+// call, a council round, a delegation) or a supervisor note from an
+// orchestrator monitor-tick. The dashboard polls /api/status and renders the
+// last N here as a grouped, expandable history — so progress lives in the
+// dashboard instead of as a stream of canned chat bubbles.
+export interface ProgressEvent {
+  ts: number;
+  kind: 'status' | 'supervisor' | 'done' | 'error';
+  phase: string;
+  label: string;
+  jobs: number;
+}
+const PROGRESS_MAX = 40;
+export const progressHistory: ProgressEvent[] = [];
+let lastProgressLabel = '';
+
+export function getProgressHistory(): ProgressEvent[] {
+  return progressHistory.slice(-PROGRESS_MAX);
+}
+
+function pushProgress(entry: ProgressEvent): void {
+  progressHistory.push(entry);
+  if (progressHistory.length > PROGRESS_MAX) {
+    progressHistory.splice(0, progressHistory.length - PROGRESS_MAX);
+  }
+}
+
+/** Append a supervisor note (an orchestrator monitor-tick report). Public so
+ *  the progress_event callback in src/index.ts can route tick prose here
+ *  instead of to the chat. */
+export function pushSupervisorNote(text: string): void {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return;
+  pushProgress({
+    ts: Date.now(),
+    kind: 'supervisor',
+    phase: liveStatus.phase || 'orchestrator',
+    label: trimmed.slice(0, 240),
+    jobs: liveStatus.jobs,
+  });
+}
+
 export function getLiveStatus() {
   return { ...liveStatus };
 }
@@ -332,6 +483,19 @@ function onPersistentStdoutData(chunk: Buffer) {
         liveStatus.tools = Array.isArray(entry.tools) ? entry.tools : [];
         liveStatus.jobs = typeof entry.jobs === 'number' ? entry.jobs : 0;
         liveStatus.ts = entry.ts || Date.now();
+        // Buffer real progress for the dashboard panel — only when the label
+        // actually changes, so a job that emits the same status repeatedly
+        // doesn't flood the history with identical entries.
+        if (liveStatus.label && liveStatus.label !== lastProgressLabel) {
+          lastProgressLabel = liveStatus.label;
+          pushProgress({
+            ts: liveStatus.ts,
+            kind: 'status',
+            phase: liveStatus.phase,
+            label: liveStatus.label,
+            jobs: liveStatus.jobs,
+          });
+        }
       } catch { /* ignore malformed status lines */ }
       continue;
     }

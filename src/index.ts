@@ -18,7 +18,7 @@ import {
   getChannelFactory,
   getRegisteredChannelNames,
 } from './channels/registry.js';
-import { runAgent, killCurrentAgent, CallbackMap } from './agent-spawn.js';
+import { runAgent, killCurrentAgent, CallbackMap, pushSupervisorNote, runSubAgentBackground } from './agent-spawn.js';
 import {
   getBackupConfig,
   createFullBackup,
@@ -74,6 +74,8 @@ import { projectAllDeliverables, startKontactWatcher } from './kontact-projectio
 import { startStatusServer, pushNotification } from './status-server.js';
 import { Channel, NewMessage, OWNER_JID, AgentInput, ScheduledTask } from './types.js';
 import { logger } from './logger.js';
+import { captureScreenshot, captureWebcam, captureWebcamFromSecurityApp, securityAppHasFrameServer, readHostImage } from './capture.js';
+import { securityLog, saveKnownPerson } from './security-log.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -220,7 +222,12 @@ function buildPrompt(newMessages: NewMessage[]): string {
   // Fetch last N+2 messages (both sides) and exclude the current pending ones to
   // get up to N turns of real back-and-forth context.
   const rawHistory = getChatHistory(OWNER_JID, MERCURY_RECENT_MESSAGES + 2) as unknown as NewMessage[];
-  const contextMessages = rawHistory.filter((m) => !pendingIds.has(m.id)).slice(-MERCURY_RECENT_MESSAGES);
+  // Exclude Heimdall (the background security agent) messages — its abnormal
+  // alerts are stored for the user/dashboard, but the orchestrator must NOT see
+  // them in its history (otherwise it parrots/acknowledges them next turn).
+  const contextMessages = rawHistory
+    .filter((m) => !pendingIds.has(m.id) && (m.sender_name || '') !== 'Heimdall')
+    .slice(-MERCURY_RECENT_MESSAGES);
 
   if (contextMessages.length > 0) {
     const MAX_HISTORY_CHARS = 12000;
@@ -944,6 +951,193 @@ export function buildAgentCallbacks(): CallbackMap {
       }
     },
 
+    // ─── Host-side image capture ───────────────────────────────────────────
+    // Screenshots, webcam frames, and arbitrary host image files are captured
+    // here in the orchestrator process (which has the host display + devices),
+    // not inside the container. The container tool pushes the returned base64
+    // into its vision-context queue.
+
+    desktop_screenshot: async (args: any) => {
+      try {
+        const windowTitle =
+          typeof args?.window_title === 'string' && args.window_title.trim()
+            ? args.window_title.trim()
+            : undefined;
+        let region: { x: number; y: number; w: number; h: number } | undefined;
+        const r = args?.region;
+        if (r && typeof r === 'object') {
+          const w = Math.max(0, Math.round(+r.w || 0));
+          const h = Math.max(0, Math.round(+r.h || 0));
+          if (w > 0 && h > 0) {
+            region = { x: Math.round(+r.x || 0), y: Math.round(+r.y || 0), w, h };
+          }
+        }
+        const cap = await captureScreenshot({ windowTitle, region });
+        logger.info(
+          { width: cap.width, height: cap.height, mediaType: cap.mediaType, windowTitle, region },
+          'desktop_screenshot: captured on host',
+        );
+        return { ok: true, image: cap.image, mediaType: cap.mediaType, width: cap.width, height: cap.height };
+      } catch (err: any) {
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
+    webcam_capture: async (args: any) => {
+      try {
+        // Prefer the Security Mode app's frame server when it's running — the
+        // security app owns /dev/video0 for its cheap detector, so grabbing the
+        // device directly would fail with "device busy". Fall back to ffmpeg.
+        let cap;
+        let source = 'ffmpeg';
+        if (await securityAppHasFrameServer()) {
+          try {
+            cap = await captureWebcamFromSecurityApp();
+            source = 'security-app';
+          } catch (err: any) {
+            logger.warn({ err }, 'webcam_capture: security frame server up but fetch failed — falling back to ffmpeg');
+            cap = await captureWebcam({
+              device: typeof args?.device === 'string' ? args.device : undefined,
+              width: typeof args?.width === 'number' ? args.width : undefined,
+            });
+          }
+        } else {
+          cap = await captureWebcam({
+            device: typeof args?.device === 'string' ? args.device : undefined,
+            width: typeof args?.width === 'number' ? args.width : undefined,
+          });
+        }
+        logger.info(
+          { source, width: cap.width, height: cap.height, mediaType: cap.mediaType },
+          'webcam_capture: captured on host',
+        );
+        return { ok: true, image: cap.image, mediaType: cap.mediaType, width: cap.width, height: cap.height };
+      } catch (err: any) {
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
+    read_image: async (args: any) => {
+      try {
+        const p = typeof args?.path === 'string' ? args.path.trim() : '';
+        if (!p) return { ok: false, error: 'missing path' };
+        const cap = await readHostImage(p);
+        logger.info(
+          { path: p, width: cap.width, height: cap.height, mediaType: cap.mediaType },
+          'read_image: loaded host image',
+        );
+        return { ok: true, image: cap.image, mediaType: cap.mediaType, width: cap.width, height: cap.height, path: p };
+      } catch (err: any) {
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
+    // Orchestrator monitor-tick reports route HERE (not send_message), so the
+    // tick's supervision prose lands in the dashboard's progress panel instead
+    // of spamming the chat. The chat only carries completed-task reports
+    // (inbox digest) and interventions.
+    progress_event: async (args: any) => {
+      try {
+        const text = typeof args?.text === 'string' ? args.text : '';
+        if (!text.trim()) return { ok: true, skipped: true };
+        pushSupervisorNote(text);
+        return { ok: true };
+      } catch (err: any) {
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
+    // ─── Security Mode ─────────────────────────────────────────────────────
+    // Close the open security alert on the standalone detector app, re-arming
+    // it so it can raise the next alert. The detector holds an alert OPEN until
+    // this is called (one alert per incident, not one per detection).
+    close_security_alert: async (_args: any) => {
+      const url = process.env.WARDEN_SECURITY_CLOSE_URL || 'http://127.0.0.1:8765/alert/close';
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3000);
+        try {
+          const res = await fetch(url, { method: 'POST', signal: controller.signal });
+          const body = await res.text().catch(() => '');
+          logger.info({ status: res.status, body: body.slice(0, 120) }, 'close_security_alert: detector re-armed');
+          return { ok: res.ok, state: body };
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch (err: any) {
+        logger.warn({ err }, 'close_security_alert: security app not reachable');
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
+    // Heimdall's conditions log (own sqlite store, store/security.db). Records
+    // each alert assessment with an exact timestamp, and queries history by
+    // local-time range so Heimdall can reference events by time/date.
+    security_log: async (args: any) => {
+      return securityLog(args);
+    },
+
+    // Heimdall recognized a person as normal → save their keyframe so the
+    // detector skips flagging them (application-side pHash compare).
+    save_known_person: async (args: any) => {
+      return saveKnownPerson(args);
+    },
+
+    // Heimdall declared the flagged detection ABNORMAL → spawn the alert on the
+    // detector (red STAND DOWN button + ALERTED state). Mirrors close_security_alert.
+    open_security_alert: async (_args: any) => {
+      const url = process.env.WARDEN_SECURITY_OPEN_URL || 'http://127.0.0.1:8765/alert/open';
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3000);
+        try {
+          const res = await fetch(url, { method: 'POST', signal: controller.signal });
+          const body = await res.text().catch(() => '');
+          logger.info({ status: res.status, body: body.slice(0, 120) }, 'open_security_alert: detector ALERTED');
+          return { ok: res.ok, state: body };
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch (err: any) {
+        logger.warn({ err }, 'open_security_alert: security app not reachable');
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
+    // Orchestrator → Heimdall direct. Spawn Heimdall in the background with the
+    // passed message; Heimdall records it in security_log as context for future
+    // reviews (it does not reply in the chat). This is how the orchestrator tells
+    // the security agent something (instead of routing through Atlas).
+    tell_heimdall: async (args: any) => {
+      const message = typeof args?.message === 'string' ? args.message : '';
+      if (!message.trim()) return { ok: false, error: 'missing message' };
+      const tz = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const localNow = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T');
+      const task = `Current local time is ${localNow} (timezone ${tz}).\n\nA message was passed to you from the orchestrator/user: "${message}". Record it in security_log (action: record, assessment=normal, condition=<the passed note>) so future reviews can use it as context, then STOP. Do not send_message.`;
+      const heimdallModel =
+        (getRouterState('orchestrator:model') || getRouterState('global:default_model') || '').replace(/^local:/, '')
+        || undefined;
+      try {
+        runSubAgentBackground({
+          agent: 'heimdall',
+          prompt: task,
+          model: heimdallModel,
+          sessionId: 'owner',
+          workspaceRoot: WORKSPACE_ROOT,
+          chatJid: OWNER_JID,
+          groupFolder: 'owner',
+          isMain: true,
+          timeoutMs: 3 * 60 * 1000,
+          callbacks: buildAgentCallbacks(),
+        } as any);
+        logger.info({ msgLen: message.length }, 'tell_heimdall: spawned Heimdall to record message');
+        return { ok: true };
+      } catch (err: any) {
+        logger.warn({ err }, 'tell_heimdall: failed to spawn Heimdall');
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
   };
 }
 
@@ -1029,6 +1223,111 @@ async function processOwnerMessages(): Promise<void> {
   const since = lastAgentTimestamp;
   const pending = getMessagesSince(OWNER_JID, since, ASSISTANT_NAME);
   if (pending.length === 0) return;
+
+  // ── "Close the alert" — the person at the keyboard re-arms the detector ──
+  // Heimdall never closes an ABNORMAL alert itself; the user closes it after
+  // they've checked / acted on it. This intercepts that command and calls the
+  // close_security_alert host callback directly (the orchestrator doesn't own
+  // that tool), then acknowledges — no orchestrator turn needed.
+  const closeText = pending.some((m) => {
+    const s = (m.content || '').toLowerCase();
+    return (/\b(close|clear|dismiss)\b/.test(s) && /\balert|security|intruder|threat\b/.test(s))
+      || /\b(stand\s+down|all\s+clear)\b/.test(s)
+      || /close.*alert/.test(s);
+  });
+  if (closeText) {
+    lastAgentTimestamp = pending[pending.length - 1]!.timestamp;
+    saveState();
+    let reply = 'Security alert closed — detector re-armed.';
+    try {
+      const r = await buildAgentCallbacks().close_security_alert({});
+      if (r && r.ok === false) reply = `Tried to close the security alert: ${r.error || 'detector app not reachable'}.`;
+    } catch (err: any) {
+      reply = `Could not close the security alert: ${err?.message ?? err}.`;
+    }
+    const ack: NewMessage = {
+      id: `sec-close-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      chat_jid: OWNER_JID,
+      sender: 'assistant',
+      sender_name: ASSISTANT_NAME,
+      content: reply,
+      timestamp: new Date().toISOString(),
+      is_from_me: false,
+      is_bot_message: true,
+    };
+    storeMessage(ack);
+    pushNotification('owner', { type: 'chat_complete', message: reply, from: OWNER_JID });
+    logger.info({ chatJid: OWNER_JID }, 'Security alert closed by user → detector re-armed');
+    return;
+  }
+
+  // ── Security Mode auto-trigger ──────────────────────────────────────────
+  // If the pending batch is a security-camera alert (posted by the standalone
+  // detector app), hand it to Heimdall — the background security sub-agent —
+  // instead of running the orchestrator on it. Heimdall reads SECURITY.md +
+  // the attached frame, decides normal vs abnormal, and either dies silently
+  // (close_security_alert) or alerts the user (send_message). This keeps the
+  // orchestrator out of the alert path so the main chat isn't muddied.
+  const isSecurityAlert = pending.some((m) => (m.content || '').startsWith('SECURITY ALERT'));
+  if (isSecurityAlert) {
+    // Advance the cursor so the alert isn't re-processed.
+    lastAgentTimestamp = pending[pending.length - 1]!.timestamp;
+    saveState();
+    logger.info({ chatJid: OWNER_JID, messageCount: pending.length }, 'Security alert → routing to Heimdall (background)');
+
+    // Inject the current local time (so Heimdall can reference events by time)
+    // and build a compact task from ONLY the latest flag. A backlog of flags can
+    // queue while Heimdall is busy; Heimdall should only look at the LAST thing
+    // sent (the current frame), not process stale older flags one-by-one.
+    const tz = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const localNow = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T');
+    const secAlerts = pending.filter((m) => (m.content || '').startsWith('SECURITY ALERT'));
+    const latest = secAlerts.length > 0 ? secAlerts[secAlerts.length - 1] : pending[pending.length - 1]!;
+    const alertText = latest.content || '';
+    const task = `Current local time is ${localNow} (timezone ${tz}).\n\n${alertText}`;
+
+    // ENGRAINED: log every flag to security.db the moment it's routed to Heimdall,
+    // so a flag is ALWAYS recorded even if Heimdall crashes before it can write its
+    // own assessment. Heimdall adds its normal/abnormal verdict on top.
+    try {
+      const m = /SECURITY ALERT — (.+?) at (\S+)\./.exec(alertText);
+      securityLog({
+        action: 'record',
+        alert_ts: m?.[2] || localNow,
+        camera: 'webcam0',
+        assessment: 'flagged',
+        condition: m?.[1] || 'security flag',
+        escalated: false,
+        data: { flag: alertText.slice(0, 500) },
+      });
+    } catch { /* best-effort */ }
+
+    // Heimdall shares the orchestrator's model (the one the dashboard sets via
+    // orchestrator:model / global:default_model) — the same model that makes
+    // webcam_capture vision work for the orchestrator. A non-vision model
+    // (e.g. deepseek-v4-pro:cloud) rejects the image and Heimdall crashes.
+    const heimdallModel =
+      (getRouterState('orchestrator:model') || getRouterState('global:default_model') || '').replace(/^local:/, '')
+      || undefined;
+
+    try {
+      runSubAgentBackground({
+        agent: 'heimdall',
+        prompt: task,
+        model: heimdallModel,
+        sessionId: 'owner',
+        workspaceRoot: WORKSPACE_ROOT,
+        chatJid: OWNER_JID,
+        groupFolder: 'owner',
+        isMain: true,
+        timeoutMs: 5 * 60 * 1000,
+        callbacks: buildAgentCallbacks(),
+      } as any);
+    } catch (err: any) {
+      logger.warn({ err }, 'Security alert: failed to spawn Heimdall');
+    }
+    return; // do NOT run the orchestrator for security alerts
+  }
 
   const prompt = buildPrompt(pending);
 

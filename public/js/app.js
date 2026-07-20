@@ -317,9 +317,10 @@
       const active = groups.some(g => g.active && !g.idle);
       dot.className = 'dot' + (active ? ' busy' : '');
 
-      // verbose bar
-      const g = groups.find(x => x.jid === STATE.currentJid) || groups[0];
-      updateVerboseBar(g);
+      // live activity panel (grouped collapsible progress history) — replaces
+      // the old static verbose bar; its collapsed summary line is the live
+      // status, and expanding it shows the history.
+      renderProgressPanel(d.progress);
 
       // stop button enable/disable
       $('btnStop').disabled = !active;
@@ -328,30 +329,51 @@
     }
   }
 
-  function updateVerboseBar(g) {
-    const bar = $('verboseBar');
-    if (!bar) return;
-    const phaseEl = qs('.phase', bar);
-    const toolsEl = qs('.tools', bar);
-    const active = g && g.active && !g.idle;
-    const label = g && g.liveLabel ? g.liveLabel : '';
-    const phase = g && g.livePhase ? g.livePhase : '';
-    const tools = g && g.liveTools && g.liveTools.length ? g.liveTools : [];
-    // Background Atlas jobs keep emitting status after the orchestrator's turn
-    // ends (the group goes idle), so treat a fresh label as live even when the
-    // group isn't active — otherwise the bar flips to "idle" while Atlas is
-    // still working in the background.
-    const fresh = g && g.liveTs && (Date.now() - g.liveTs < 30000);
-    if ((active || fresh) && (label || phase)) {
-      bar.classList.remove('idle');
-      phaseEl.textContent = label || phase;
-      toolsEl.textContent = tools.length ? '· ' + tools.join(', ') : '';
-      bar.style.display = '';
-    } else {
-      bar.classList.add('idle');
-      phaseEl.textContent = 'idle';
-      toolsEl.textContent = '';
+  // ── Live activity panel (grouped, collapsible progress history) ──
+  // Progress lives here instead of as a stream of canned chat bubbles. The
+  // orchestrator's monitor-tick reports route to the dashboard (progress_event)
+  // and surface as 'supervisor' entries; real atlas/council status changes
+  // surface as 'status' entries. Collapsed = one summary line; expanded = the
+  // recent history.
+  function renderProgressPanel(events) {
+    const panel = $('progressPanel');
+    const summary = $('progressSummary');
+    const countEl = $('progressCount');
+    const list = $('progressList');
+    if (!panel) return;
+    const evs = Array.isArray(events) ? events : [];
+    if (!evs.length) {
+      panel.classList.add('empty');
+      summary.textContent = 'No live activity';
+      countEl.textContent = '';
+      list.innerHTML = '';
+      return;
     }
+    panel.classList.remove('empty');
+    const latest = evs[evs.length - 1];
+    summary.textContent = latest.label || latest.phase || 'Working…';
+    countEl.textContent = `${evs.length} update${evs.length > 1 ? 's' : ''}`;
+    // Render newest-first inside the expanded body.
+    const rows = evs.slice().reverse().map((e) => {
+      const kind = e.kind || 'status';
+      const tag = kind === 'supervisor' ? 'supervisor'
+        : kind === 'done' ? 'done'
+        : kind === 'error' ? 'error'
+        : 'status';
+      const label = kind === 'supervisor' ? '▸ ' + esc(e.label || '')
+        : esc(e.label || e.phase || '');
+      return `<li><span class="ts">${fmtTime(e.ts)}</span><span class="kind ${tag}">${tag}</span><span class="label">${label}</span></li>`;
+    }).join('');
+    list.innerHTML = rows;
+  }
+
+  function toggleProgressPanel() {
+    const panel = $('progressPanel');
+    if (!panel) return;
+    const collapsed = panel.classList.toggle('collapsed');
+    const header = $('progressPanelHeader');
+    if (header) header.setAttribute('aria-expanded', String(!collapsed));
+    try { localStorage.setItem('warden-progress-expanded', collapsed ? '0' : '1'); } catch {}
   }
 
   function startStatusPolling() {
@@ -1985,39 +2007,6 @@
     }
   }
 
-  // ============================================================= File attachments (best-effort upload)
-  function attachFiles() {
-    $('fileInput').click();
-  }
-  async function onFilesChosen(ev) {
-    const files = Array.from(ev.target.files || []);
-    if (!files.length) return;
-    STATE.selectedAttachments = files;
-    const badge = $('attachBadge');
-    badge.textContent = files.length + ' file' + (files.length > 1 ? 's' : '') + ' attached';
-    // Upload immediately to the owner folder so the agent can read them
-    for (const f of files) {
-      try {
-        await uploadFile('/api/files/upload?path=' + encodeURIComponent('owner/attachments'), f);
-      } catch (e) {
-        toast('Upload failed: ' + e.message, 'error');
-      }
-    }
-  }
-  function uploadFile(url, file) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', url);
-      xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name));
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.responseText);
-        else reject(new Error('HTTP ' + xhr.status));
-      };
-      xhr.onerror = () => reject(new Error('network error'));
-      xhr.send(file);
-    });
-  }
-
   // ============================================================= Wire-up
   function init() {
     // Load senders from localStorage
@@ -2074,8 +2063,18 @@
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
     });
-    $('btnAttach').addEventListener('click', attachFiles);
-    $('fileInput').addEventListener('change', onFilesChosen);
+
+    // Live activity panel — collapse toggle (persisted)
+    const ppHeader = $('progressPanelHeader');
+    if (ppHeader) {
+      ppHeader.addEventListener('click', toggleProgressPanel);
+      try {
+        if (localStorage.getItem('warden-progress-expanded') === '1') {
+          const panel = $('progressPanel');
+          if (panel) { panel.classList.remove('collapsed'); ppHeader.setAttribute('aria-expanded', 'true'); }
+        }
+      } catch {}
+    }
 
     // Tasks
     $('btnNewTask').addEventListener('click', showTaskForm);

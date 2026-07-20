@@ -22,3 +22,4 @@ import './fabric-tools.js';
 import './host-tools.js';
 import './desktop.js';
 import './browser.js';
+import './security-tools.js';
