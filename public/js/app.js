@@ -319,8 +319,10 @@
 
       // live activity panel (grouped collapsible progress history) — replaces
       // the old static verbose bar; its collapsed summary line is the live
-      // status, and expanding it shows the history.
-      renderProgressPanel(d.progress);
+      // status, and expanding it shows the history. Clear it to "No live
+      // activity" when nothing is happening so it doesn't stick on the last
+      // completed step.
+      renderProgressPanel(active ? (d.progress || []) : []);
 
       // stop button enable/disable
       $('btnStop').disabled = !active;
