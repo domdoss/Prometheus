@@ -17,6 +17,7 @@
 **[📊 Dashboard](#-dashboard)** ·
 **[🧩 MCP](#-mcp-ecosystem)** ·
 **[🗣️ Voice](#%EF%B8%8F-voice-assistant)** ·
+**[🛡️ Security Mode](#-security-mode)** ·
 **[🚀 Quick Start](#%EF%B8%8F-quick-start)**
 
 </div>
@@ -96,6 +97,7 @@ Each sub-agent has its own system prompt, its own toolset, and its own model. Th
 | **Byte** | Local or cloud (local recommended) | Projects, deliverables, blockers, work tasks, time tracking | Work management. |
 | **Artemis** | Local or cloud | Read-only file access | Critical review — audits conversations and decisions. |
 | **The Council** | 3×, local or cloud | Read-only file access | Three independent seats (Skeptic, Pragmatist, Synthesist) deliberate in parallel on high-stakes decisions. |
+| **Heimdall** | Cloud or local (vision — cloud recommended) | `security_log`, `save_known_person`, `dismiss_security_flag`, `alert_security`, open/close security alert, vision | Background security — reviews each flagged webcam detection; normal → saves the person + dismisses, abnormal → alerts you (image attached) and opens STAND DOWN. Spawned directly by the orchestrator via `tell_heimdall`, never via Atlas. |
 
 > 🎛️ **Every agent's model is picked in the dashboard** — local Ollama or cloud, your call. Local and cloud run through the [same Ollama pipeline](#-hybrid-model-architecture), so switching an agent between them needs no code or infrastructure change. Iris, Dexter, and Byte are light, structured-task agents — run them on a local model (granite is plenty) and save cloud spend for Atlas and the Council.
 
