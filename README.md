@@ -201,20 +201,13 @@ All of this is configured from the dashboard's Settings panel — assistant name
 
 ### 🔄 One Pipeline, Local or Cloud
 
-There is no separate infrastructure for cloud models. Ollama serves both local models (on your machine) and cloud models (remote Ollama-compatible endpoints) through the same HTTP API — so every agent can be flipped between local and cloud from the dashboard with no code or infrastructure change. You're just picking a model id. The credential proxy (port 3001) sits in front of it all so the agent never sees real API keys:
-1. Validates the auth token
-2. Looks up and decrypts the user's API key
-3. Forwards local models directly to `localhost:11434`
-4. Translates to the cloud endpoint's format and injects the real key only at the proxy layer
+There is no separate infrastructure for cloud models. Ollama serves both local models (on your machine) and cloud models (remote Ollama-compatible endpoints) through the same HTTP API — so every agent can be flipped between local and cloud from the dashboard with no code or infrastructure change. You're just picking a model id. The agent-runner talks to Ollama directly — no proxy in the path by default.
 
 ### 🧭 Model Routing
 
-The agent-runner speaks Ollama's native HTTP API. The credential proxy (port 3001) routes every request based on the target model:
+The agent-runner speaks Ollama's native HTTP API and talks to Ollama directly — local models at `localhost:11434`, cloud models at their Ollama-compatible endpoint, model picked per role in the dashboard. No proxy in the path. The agent doesn't know or care whether the model is local or cloud; same format, same tools, same conversation.
 
-- **Local models** → forwarded directly to `localhost:11434`
-- **Cloud models** → `ollama-translate.ts` translates the request format as needed for Ollama cloud endpoints, injects the real API key
-
-The agent doesn't know or care whether the model is local or cloud. Same format, same tools, same conversation. You pick the model per role in the dashboard and the proxy handles the rest.
+**Optional — piping in Claude:** `src/credential-proxy.ts` (port 3001) is in the codebase but **not wired in by default**. It exists for one case: routing to Anthropic's Claude. It translates Ollama-native requests ↔ Anthropic format and injects the Claude API key so the agent-runner never sees it. If you want Claude, wire the proxy in and point the agent-runner at it; otherwise everything stays on native Ollama.
 
 ### 💾 Session Isolation
 
@@ -395,7 +388,6 @@ ASSISTANT_NAME=Warden
 TZ=America/Vancouver
 IDLE_TIMEOUT=14400000          # 4h warm-runner window
 OLLAMA_URL=http://127.0.0.1:11434
-OLLAMA_CHAT_MODEL=glm-5.2:cloud
 TELEGRAM_BOT_TOKEN=            # from @BotFather
 ```
 
